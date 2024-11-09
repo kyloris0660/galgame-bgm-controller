@@ -55,11 +55,38 @@ class AudioController:
         drawing.rectangle([39, 15, 49, 49], fill=pause_color)
         return image
     
+    def reselect_process(self):
+        """重新选择要监控的进程"""
+        # 如果正在监控，先取消当前进程的静音状态
+        if self.target_pid:
+            try:
+                sessions = AudioUtilities.GetAllSessions()
+                for session in sessions:
+                    if (session.Process and 
+                        session.Process.pid == self.target_pid):
+                        volume = session._ctl.QueryInterface(ISimpleAudioVolume)
+                        volume.SetMute(0, None)  # 取消静音
+                        break
+            except Exception as e:
+                print(f"取消静音失败: {e}")
+
+        # 创建新的选择窗口
+        self.select_target_process()
+        
+        # 更新托盘菜单显示
+        if self.tray_icon:
+            self.update_tray_menu()
+            
     def get_menu(self):
         """获取当前状态的菜单"""
         return pystray.Menu(
             pystray.MenuItem(
                 "Galgame音频控制器",
+                None,
+                enabled=False
+            ),
+            pystray.MenuItem(
+                f"当前进程: {self.target_name if self.target_name else '未选择'}", 
                 None,
                 enabled=False
             ),
@@ -76,6 +103,10 @@ class AudioController:
                 "仅最小化时静音",
                 self.toggle_minimize_only,
                 checked=lambda item: self.minimize_only
+            ),
+            pystray.MenuItem(
+                "重新选择进程",
+                self.reselect_process
             ),
             pystray.MenuItem(
                 "退出程序",
@@ -96,12 +127,53 @@ class AudioController:
             menu=self.get_menu()
         )
 
-    def update_icon(self):
-        """更新图标状态"""
+    def update_icon_and_menu(self):
+        """更新图标和菜单状态"""
         if self.tray_icon:
             new_icon = self.create_pause_icon() if self.paused else self.create_play_icon()
             self.tray_icon.icon = new_icon
+            # 这里直接调用 get_menu() 来更新菜单
             self.tray_icon.menu = self.get_menu()
+
+    def reselect_process(self):
+        """重新选择要监控的进程"""
+        # 如果正在监控，先取消当前进程的静音状态
+        if self.target_pid:
+            try:
+                sessions = AudioUtilities.GetAllSessions()
+                for session in sessions:
+                    if (session.Process and 
+                        session.Process.pid == self.target_pid):
+                        volume = session._ctl.QueryInterface(ISimpleAudioVolume)
+                        volume.SetMute(0, None)  # 取消静音
+                        break
+            except Exception as e:
+                print(f"取消静音失败: {e}")
+
+        # 创建新的选择窗口
+        self.select_target_process()
+        
+        # 更新图标和菜单
+        self.update_icon_and_menu()
+
+    def toggle_pause(self):
+        """切换暂停状态"""
+        self.paused = not self.paused
+        if self.paused:
+            # 暂停时确保取消静音
+            try:
+                sessions = AudioUtilities.GetAllSessions()
+                for session in sessions:
+                    if (session.Process and 
+                        session.Process.pid == self.target_pid):
+                        volume = session._ctl.QueryInterface(ISimpleAudioVolume)
+                        volume.SetMute(0, None)  # 取消静音
+                        break
+            except Exception as e:
+                print(f"暂停时取消静音失败: {e}")
+        
+        # 更新图标和菜单
+        self.update_icon_and_menu()
 
     def toggle_pause(self):
         """切换暂停状态"""
@@ -145,25 +217,39 @@ class AudioController:
         """创建进程选择窗口"""
         root = tk.Tk()
         root.title("选择要监控的程序")
-        root.geometry("400x300")
+        root.geometry("400x450")  # 增加窗口默认高度
         
+        # 添加标签
+        label = ttk.Label(root, text="请选择要监控的游戏进程：")
+        label.pack(pady=(10,0), padx=10, anchor='w')
+        
+        # 创建主框架
         frame = ttk.Frame(root)
         frame.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
         
-        tree = ttk.Treeview(frame, columns=('PID', 'Name'), show='headings')
+        # 创建树形视图和滚动条
+        tree = ttk.Treeview(frame, columns=('PID', 'Name'), show='headings', height=15)  # 设置固定高度
         tree.heading('PID', text='进程ID')
         tree.heading('Name', text='进程名称')
+        tree.column('PID', width=100)  # 设置PID列宽
+        tree.column('Name', width=280)  # 设置Name列宽
         
         scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
         tree.configure(yscrollcommand=scrollbar.set)
         
+        # 填充数据
         sessions = AudioUtilities.GetAllSessions()
         for session in sessions:
             if session.Process:
                 tree.insert('', tk.END, values=(session.Process.pid, session.Process.name()))
         
+        # 布局树形视图和滚动条
         tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # 创建按钮框架
+        button_frame = ttk.Frame(root)
+        button_frame.pack(pady=10, fill=tk.X)
         
         def on_select():
             selected_item = tree.selection()
@@ -172,21 +258,31 @@ class AudioController:
                 self.target_pid = pid
                 self.target_name = name
                 root.destroy()
+            else:
+                tk.messagebox.showwarning("提示", "请先选择一个进程")
         
-        select_btn = ttk.Button(root, text="确定", command=on_select)
-        select_btn.pack(pady=10)
+        # 确认按钮
+        select_btn = ttk.Button(button_frame, text="确定", command=on_select, width=20)
+        select_btn.pack(pady=5)
         
-        # 显示使用提示
-        tips_text = """提示：
-1. 选择要监控的游戏进程后点击确定
-2. 程序会最小化到系统托盘
-3. 绿色图标表示正在监控，红色图标表示已暂停
-4. 默认设置为"仅最小化时静音"模式：
-   - 游戏最小化时会自动静音
-   - 切换到其他窗口时不会静音
-   - 可在托盘菜单中切换模式"""
-        tips_label = ttk.Label(root, text=tips_text, justify=tk.LEFT, wraplength=380)
-        tips_label.pack(pady=10, padx=10)
+        # 窗口居中显示
+        root.update_idletasks()
+        width = root.winfo_width()
+        height = root.winfo_height()
+        x = (root.winfo_screenwidth() // 2) - (width // 2)
+        y = (root.winfo_screenheight() // 2) - (height // 2)
+        root.geometry(f'{width}x{height}+{x}+{y}')
+        
+        # 设置最小窗口大小
+        root.minsize(400, 450)
+        
+        # 双击选择功能
+        def on_double_click(event):
+            on_select()
+            
+        tree.bind('<Double-1>', on_double_click)
+        
+        root.mainloop()
         
         root.mainloop()
     
