@@ -17,33 +17,97 @@ class AudioController:
         self.running = True
         self.monitoring_thread = None
         self.tray_icon = None
+        self.paused = False
         
-    def create_tray_icon(self):
-        """创建系统托盘图标"""
-        # 创建一个简单的图标
+    def create_play_icon(self):
+        """创建播放状态的图标（绿色三角形）"""
         icon_size = 64
         image = Image.new('RGB', (icon_size, icon_size), color='white')
         drawing = ImageDraw.Draw(image)
-        drawing.rectangle([20, 20, 44, 44], fill='black')
         
-        def exit_with_confirmation():
-            self.stop_monitoring()
-            
-        # 创建托盘图标菜单
-        menu = (
-            pystray.MenuItem("Galgame音频控制器", lambda: None, enabled=False),
-            pystray.MenuItem("状态: 运行中", lambda: None, enabled=False),
-            pystray.MenuItem("说明: 右键点击退出即可", lambda: None, enabled=False),
-            pystray.MenuItem("退出", exit_with_confirmation)
+        # 绘制绿色三角形（播放图标）
+        play_color = '#00C853'  
+        points = [
+            (20, 15),  
+            (20, 49),  
+            (49, 32)   
+        ]
+        drawing.polygon(points, fill=play_color)
+        return image
+        
+    def create_pause_icon(self):
+        """创建暂停状态的图标（红色双竖线）"""
+        icon_size = 64
+        image = Image.new('RGB', (icon_size, icon_size), color='white')
+        drawing = ImageDraw.Draw(image)
+        
+        # 绘制红色双竖线（暂停图标）
+        pause_color = '#D32F2F'  
+        drawing.rectangle([20, 15, 30, 49], fill=pause_color)
+        drawing.rectangle([39, 15, 49, 49], fill=pause_color)
+        return image
+    
+    def get_menu(self):
+        """获取当前状态的菜单"""
+        return pystray.Menu(
+            pystray.MenuItem(
+                "Galgame音频控制器",
+                None,
+                enabled=False
+            ),
+            pystray.MenuItem(
+                f"状态: {'已暂停' if self.paused else '监控中'}", 
+                None,
+                enabled=False
+            ),
+            pystray.MenuItem(
+                f"{'继续监控' if self.paused else '暂停监控'}", 
+                self.toggle_pause
+            ),
+            pystray.MenuItem(
+                "退出程序",
+                self.stop_monitoring
+            )
         )
+
+    def create_tray_icon(self):
+        """创建系统托盘图标"""
+        # 初始使用播放图标
+        initial_icon = self.create_play_icon()
         
         # 创建托盘图标
         self.tray_icon = pystray.Icon(
             "galgame_audio_controller",
-            image,
-            "Galgame音频控制器\n右键点击退出",
-            menu
+            initial_icon,
+            "Galgame音频控制器\n右键可暂停/继续",
+            menu=self.get_menu()
         )
+
+    def update_icon(self):
+        """更新图标状态"""
+        if self.tray_icon:
+            new_icon = self.create_pause_icon() if self.paused else self.create_play_icon()
+            self.tray_icon.icon = new_icon
+            self.tray_icon.menu = self.get_menu()
+
+    def toggle_pause(self):
+        """切换暂停状态"""
+        self.paused = not self.paused
+        if self.paused:
+            # 暂停时确保取消静音
+            try:
+                sessions = AudioUtilities.GetAllSessions()
+                for session in sessions:
+                    if (session.Process and 
+                        session.Process.pid == self.target_pid):
+                        volume = session._ctl.QueryInterface(ISimpleAudioVolume)
+                        volume.SetMute(0, None)  # 取消静音
+                        break
+            except Exception as e:
+                print(f"暂停时取消静音失败: {e}")
+        
+        # 更新图标和菜单
+        self.update_icon()
 
     def stop_monitoring(self):
         """停止监控并退出程序"""
@@ -63,7 +127,7 @@ class AudioController:
         self.running = False
         if self.tray_icon:
             self.tray_icon.stop()
-        
+    
     def select_target_process(self):
         """创建进程选择窗口"""
         root = tk.Tk()
@@ -95,19 +159,12 @@ class AudioController:
                 self.target_pid = pid
                 self.target_name = name
                 root.destroy()
-                # 更新托盘图标状态文本
-                if self.tray_icon:
-                    new_menu = (
-                        pystray.MenuItem(f"状态: 正在监控 {name}", lambda: None, enabled=False),
-                        pystray.MenuItem("退出", self.stop_monitoring)
-                    )
-                    self.tray_icon.menu = new_menu
         
         select_btn = ttk.Button(root, text="确定", command=on_select)
         select_btn.pack(pady=10)
         
         # 显示使用提示
-        tips_text = "提示：\n1. 选择要监控的游戏进程后点击确定\n2. 程序会最小化到系统托盘"
+        tips_text = "提示：\n1. 选择要监控的游戏进程后点击确定\n2. 程序会最小化到系统托盘\n3. 绿色图标表示正在监控，红色图标表示已暂停"
         tips_label = ttk.Label(root, text=tips_text, justify=tk.LEFT, wraplength=380)
         tips_label.pack(pady=10, padx=10)
         
@@ -130,6 +187,11 @@ class AudioController:
             
         while self.running:
             try:
+                # 如果处于暂停状态，不进行音频控制
+                if self.paused:
+                    time.sleep(1)
+                    continue
+                    
                 foreground_pid = self.get_foreground_window_pid()
                 if not foreground_pid:
                     time.sleep(1)
