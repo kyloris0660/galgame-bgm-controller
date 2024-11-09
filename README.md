@@ -24,7 +24,7 @@ cd galgame-bgm-controller
 
 2. 安装依赖：
 ```bash
-pip install pycaw psutil pywin32 pytk
+pip install pycaw psutil pywin32 pytk pillow pystray
 ```
 
 3. 运行程序：
