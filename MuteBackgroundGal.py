@@ -19,12 +19,7 @@ class AudioController:
         self.tray_icon = None
         self.paused = False
         self.minimize_only = True  # 默认设置为仅最小化时静音
-        
-    def toggle_minimize_only(self):
-        """切换是否仅在最小化时静音"""
-        self.minimize_only = not self.minimize_only
-        self.update_icon()
-        
+
     def create_play_icon(self):
         """创建播放状态的图标（绿色三角形）"""
         icon_size = 64
@@ -54,29 +49,12 @@ class AudioController:
         # 右边竖线
         drawing.rectangle([39, 15, 49, 49], fill=pause_color)
         return image
-    
-    def reselect_process(self):
-        """重新选择要监控的进程"""
-        # 如果正在监控，先取消当前进程的静音状态
-        if self.target_pid:
-            try:
-                sessions = AudioUtilities.GetAllSessions()
-                for session in sessions:
-                    if (session.Process and 
-                        session.Process.pid == self.target_pid):
-                        volume = session._ctl.QueryInterface(ISimpleAudioVolume)
-                        volume.SetMute(0, None)  # 取消静音
-                        break
-            except Exception as e:
-                print(f"取消静音失败: {e}")
 
-        # 创建新的选择窗口
-        self.select_target_process()
-        
-        # 更新托盘菜单显示
-        if self.tray_icon:
-            self.update_tray_menu()
-            
+    def toggle_minimize_only(self):
+        """切换是否仅在最小化时静音"""
+        self.minimize_only = not self.minimize_only
+        self.update_icon_and_menu()
+
     def get_menu(self):
         """获取当前状态的菜单"""
         return pystray.Menu(
@@ -132,8 +110,45 @@ class AudioController:
         if self.tray_icon:
             new_icon = self.create_pause_icon() if self.paused else self.create_play_icon()
             self.tray_icon.icon = new_icon
-            # 这里直接调用 get_menu() 来更新菜单
             self.tray_icon.menu = self.get_menu()
+
+    def toggle_pause(self):
+        """切换暂停状态"""
+        self.paused = not self.paused
+        if self.paused:
+            # 暂停时确保取消静音
+            try:
+                sessions = AudioUtilities.GetAllSessions()
+                for session in sessions:
+                    if (session.Process and 
+                        session.Process.pid == self.target_pid):
+                        volume = session._ctl.QueryInterface(ISimpleAudioVolume)
+                        volume.SetMute(0, None)  # 取消静音
+                        break
+            except Exception as e:
+                print(f"暂停时取消静音失败: {e}")
+        
+        # 更新图标和菜单
+        self.update_icon_and_menu()
+
+    def stop_monitoring(self):
+        """停止监控并退出程序"""
+        try:
+            # 在退出前确保取消静音
+            sessions = AudioUtilities.GetAllSessions()
+            for session in sessions:
+                if (session.Process and 
+                    session.Process.pid == self.target_pid):
+                    volume = session._ctl.QueryInterface(ISimpleAudioVolume)
+                    # 强制取消静音
+                    volume.SetMute(0, None)
+                    break
+        except Exception as e:
+            print(f"退出时取消静音失败: {e}")
+            
+        self.running = False
+        if self.tray_icon:
+            self.tray_icon.stop()
 
     def reselect_process(self):
         """重新选择要监控的进程"""
@@ -156,63 +171,6 @@ class AudioController:
         # 更新图标和菜单
         self.update_icon_and_menu()
 
-    def toggle_pause(self):
-        """切换暂停状态"""
-        self.paused = not self.paused
-        if self.paused:
-            # 暂停时确保取消静音
-            try:
-                sessions = AudioUtilities.GetAllSessions()
-                for session in sessions:
-                    if (session.Process and 
-                        session.Process.pid == self.target_pid):
-                        volume = session._ctl.QueryInterface(ISimpleAudioVolume)
-                        volume.SetMute(0, None)  # 取消静音
-                        break
-            except Exception as e:
-                print(f"暂停时取消静音失败: {e}")
-        
-        # 更新图标和菜单
-        self.update_icon_and_menu()
-
-    def toggle_pause(self):
-        """切换暂停状态"""
-        self.paused = not self.paused
-        if self.paused:
-            # 暂停时确保取消静音
-            try:
-                sessions = AudioUtilities.GetAllSessions()
-                for session in sessions:
-                    if (session.Process and 
-                        session.Process.pid == self.target_pid):
-                        volume = session._ctl.QueryInterface(ISimpleAudioVolume)
-                        volume.SetMute(0, None)  # 取消静音
-                        break
-            except Exception as e:
-                print(f"暂停时取消静音失败: {e}")
-        
-        # 更新图标和菜单
-        self.update_icon()
-
-    def stop_monitoring(self):
-        """停止监控并退出程序"""
-        try:
-            # 在退出前确保取消静音
-            sessions = AudioUtilities.GetAllSessions()
-            for session in sessions:
-                if (session.Process and 
-                    session.Process.pid == self.target_pid):
-                    volume = session._ctl.QueryInterface(ISimpleAudioVolume)
-                    # 强制取消静音
-                    volume.SetMute(0, None)
-                    break
-        except Exception as e:
-            print(f"退出时取消静音失败: {e}")
-            
-        self.running = False
-        if self.tray_icon:
-            self.tray_icon.stop()
-    
     def select_target_process(self):
         """创建进程选择窗口"""
         root = tk.Tk()
@@ -283,18 +241,7 @@ class AudioController:
         tree.bind('<Double-1>', on_double_click)
         
         root.mainloop()
-        
-        root.mainloop()
-    
-    def get_foreground_window_pid(self):
-        """获取当前前台窗口的进程ID"""
-        try:
-            hwnd = win32gui.GetForegroundWindow()
-            _, pid = win32process.GetWindowThreadProcessId(hwnd)
-            return pid
-        except:
-            return None
-    
+
     def is_window_minimized(self, pid):
         """检查指定进程的窗口是否最小化"""
         def callback(hwnd, hwnds):
@@ -314,6 +261,15 @@ class AudioController:
             if not win32gui.IsIconic(hwnd):  # 如果有任何一个窗口不是最小化的
                 return False
         return len(hwnds) > 0  # 所有窗口都是最小化的（且至少找到了一个窗口）
+
+    def get_foreground_window_pid(self):
+        """获取当前前台窗口的进程ID"""
+        try:
+            hwnd = win32gui.GetForegroundWindow()
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            return pid
+        except:
+            return None
 
     def monitor_target_app(self):
         """监控目标应用的音频状态"""
@@ -360,7 +316,7 @@ class AudioController:
             except Exception as e:
                 print(f"监控过程中出现错误: {e}")
                 time.sleep(1)
-                
+
     def start(self):
         """启动程序"""
         # 创建托盘图标
