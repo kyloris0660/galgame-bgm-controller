@@ -18,6 +18,12 @@ class AudioController:
         self.monitoring_thread = None
         self.tray_icon = None
         self.paused = False
+        self.minimize_only = True  # 默认设置为仅最小化时静音
+        
+    def toggle_minimize_only(self):
+        """切换是否仅在最小化时静音"""
+        self.minimize_only = not self.minimize_only
+        self.update_icon()
         
     def create_play_icon(self):
         """创建播放状态的图标（绿色三角形）"""
@@ -26,11 +32,11 @@ class AudioController:
         drawing = ImageDraw.Draw(image)
         
         # 绘制绿色三角形（播放图标）
-        play_color = '#00C853'  
+        play_color = '#00C853'  # 使用鲜艳的绿色
         points = [
-            (20, 15),  
-            (20, 49),  
-            (49, 32)   
+            (20, 15),  # 左上角
+            (20, 49),  # 左下角
+            (49, 32)   # 右中点
         ]
         drawing.polygon(points, fill=play_color)
         return image
@@ -42,8 +48,10 @@ class AudioController:
         drawing = ImageDraw.Draw(image)
         
         # 绘制红色双竖线（暂停图标）
-        pause_color = '#D32F2F'  
+        pause_color = '#D32F2F'  # 使用鲜艳的红色
+        # 左边竖线
         drawing.rectangle([20, 15, 30, 49], fill=pause_color)
+        # 右边竖线
         drawing.rectangle([39, 15, 49, 49], fill=pause_color)
         return image
     
@@ -63,6 +71,11 @@ class AudioController:
             pystray.MenuItem(
                 f"{'继续监控' if self.paused else '暂停监控'}", 
                 self.toggle_pause
+            ),
+            pystray.MenuItem(
+                "仅最小化时静音",
+                self.toggle_minimize_only,
+                checked=lambda item: self.minimize_only
             ),
             pystray.MenuItem(
                 "退出程序",
@@ -164,7 +177,14 @@ class AudioController:
         select_btn.pack(pady=10)
         
         # 显示使用提示
-        tips_text = "提示：\n1. 选择要监控的游戏进程后点击确定\n2. 程序会最小化到系统托盘\n3. 绿色图标表示正在监控，红色图标表示已暂停"
+        tips_text = """提示：
+1. 选择要监控的游戏进程后点击确定
+2. 程序会最小化到系统托盘
+3. 绿色图标表示正在监控，红色图标表示已暂停
+4. 默认设置为"仅最小化时静音"模式：
+   - 游戏最小化时会自动静音
+   - 切换到其他窗口时不会静音
+   - 可在托盘菜单中切换模式"""
         tips_label = ttk.Label(root, text=tips_text, justify=tk.LEFT, wraplength=380)
         tips_label.pack(pady=10, padx=10)
         
@@ -179,6 +199,26 @@ class AudioController:
         except:
             return None
     
+    def is_window_minimized(self, pid):
+        """检查指定进程的窗口是否最小化"""
+        def callback(hwnd, hwnds):
+            try:
+                _, window_pid = win32process.GetWindowThreadProcessId(hwnd)
+                if window_pid == pid and win32gui.IsWindowVisible(hwnd):
+                    hwnds.append(hwnd)
+            except:
+                pass
+            return True
+
+        hwnds = []
+        win32gui.EnumWindows(callback, hwnds)
+        
+        # 检查所有找到的窗口
+        for hwnd in hwnds:
+            if not win32gui.IsIconic(hwnd):  # 如果有任何一个窗口不是最小化的
+                return False
+        return len(hwnds) > 0  # 所有窗口都是最小化的（且至少找到了一个窗口）
+
     def monitor_target_app(self):
         """监控目标应用的音频状态"""
         if not self.target_pid:
@@ -202,8 +242,21 @@ class AudioController:
                     if (session.Process and 
                         session.Process.pid == self.target_pid):
                         volume = session._ctl.QueryInterface(ISimpleAudioVolume)
+                        
+                        # 检查窗口状态
+                        is_minimized = self.is_window_minimized(self.target_pid)
                         is_foreground = (foreground_pid == self.target_pid)
-                        volume.SetMute(not is_foreground, None)
+                        
+                        # 根据设置决定是否静音
+                        should_mute = False
+                        if self.minimize_only:
+                            # 仅在最小化时静音
+                            should_mute = is_minimized
+                        else:
+                            # 在非前台时静音
+                            should_mute = not is_foreground
+                            
+                        volume.SetMute(should_mute, None)
                         break
                 
                 time.sleep(1)
