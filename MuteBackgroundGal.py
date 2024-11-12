@@ -19,6 +19,7 @@ class AudioController:
         self.tray_icon = None
         self.paused = False
         self.minimize_only = True  # 默认设置为仅最小化时静音
+        self.last_muted_state = {}  # 用于跟踪每个进程的静音状态
 
     def create_play_icon(self):
         """创建播放状态的图标（绿色三角形）"""
@@ -134,15 +135,12 @@ class AudioController:
     def stop_monitoring(self):
         """停止监控并退出程序"""
         try:
-            # 在退出前确保取消静音
+            # 在退出前确保取消所有进程的静音
             sessions = AudioUtilities.GetAllSessions()
             for session in sessions:
-                if (session.Process and 
-                    session.Process.pid == self.target_pid):
+                if session.Process and session.Process.pid in self.last_muted_state:
                     volume = session._ctl.QueryInterface(ISimpleAudioVolume)
-                    # 强制取消静音
-                    volume.SetMute(0, None)
-                    break
+                    volume.SetMute(0, None)  # 强制取消静音
         except Exception as e:
             print(f"退出时取消静音失败: {e}")
             
@@ -215,7 +213,12 @@ class AudioController:
                 pid, name = tree.item(selected_item[0])['values']
                 self.target_pid = pid
                 self.target_name = name
+                # 初始化选定进程的静音状态
+                self.last_muted_state[pid] = False
                 root.destroy()
+                # 立即更新托盘图标的菜单显示
+                if self.tray_icon:
+                    self.update_icon_and_menu()
             else:
                 tk.messagebox.showwarning("提示", "请先选择一个进程")
         
@@ -291,25 +294,35 @@ class AudioController:
                 
                 sessions = AudioUtilities.GetAllSessions()
                 for session in sessions:
-                    if (session.Process and 
-                        session.Process.pid == self.target_pid):
+                    if session.Process:
                         volume = session._ctl.QueryInterface(ISimpleAudioVolume)
+                        pid = session.Process.pid
                         
-                        # 检查窗口状态
-                        is_minimized = self.is_window_minimized(self.target_pid)
-                        is_foreground = (foreground_pid == self.target_pid)
-                        
-                        # 根据设置决定是否静音
-                        should_mute = False
-                        if self.minimize_only:
-                            # 仅在最小化时静音
-                            should_mute = is_minimized
-                        else:
-                            # 在非前台时静音
-                            should_mute = not is_foreground
+                        # 如果是目标进程
+                        if pid == self.target_pid:
+                            # 检查窗口状态
+                            is_minimized = self.is_window_minimized(pid)
+                            is_foreground = (foreground_pid == pid)
                             
-                        volume.SetMute(should_mute, None)
-                        break
+                            # 根据设置决定是否静音
+                            should_mute = False
+                            if self.minimize_only:
+                                # 仅在最小化时静音
+                                should_mute = is_minimized
+                            else:
+                                # 在非前台时静音
+                                should_mute = not is_foreground
+                            
+                            # 更新静音状态
+                            if should_mute != self.last_muted_state.get(pid, False):
+                                volume.SetMute(should_mute, None)
+                                self.last_muted_state[pid] = should_mute
+                        
+                        # 如果不是目标进程但在last_muted_state中（说明之前是目标进程）
+                        elif pid in self.last_muted_state and self.last_muted_state[pid]:
+                            # 恢复非目标进程的音量
+                            volume.SetMute(0, None)
+                            del self.last_muted_state[pid]  # 从跟踪列表中移除
                 
                 time.sleep(1)
                 
