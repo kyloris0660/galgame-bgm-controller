@@ -474,7 +474,17 @@ class AudioController:
         # 运行托盘图标
         self.tray_icon.run()
 
+def setup_logging():
+    """设置日志输出"""
+    log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bgm_controller.log')
+    sys.stdout = open(log_file, 'a', encoding='utf-8')
+    sys.stderr = sys.stdout
+
 def main():
+    setup_logging()  # 设置日志输出
+    print("\n" + "="*50)
+    print(f"程序启动时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    
     controller = AudioController()
     controller.start()
 

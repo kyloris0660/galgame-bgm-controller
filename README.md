@@ -39,12 +39,11 @@ pip install pycaw psutil pywin32 pytk pillow pystray
 
 3. 运行程序：
 
-```bash
-python admin_launcher.py
-```
+- 直接双击 `start.pyw` 运行（推荐）
+- 或者命令行运行：`pythonw start.pyw`
 
 4. 在弹出的窗口中选择需要控制的Galgame进程（历史记录将显示为绿色背景）
-5. 程序会自动监控选定游戏的音频状态
+5. 程序会自动监控选定游戏的音频状态，并在后台运行
 6. 使用托盘图标右键菜单可以：
    - 查看当前监控状态
    - 暂停/继续监控
@@ -60,3 +59,4 @@ python admin_launcher.py
 - 建议在运行游戏前先启动此程序
 - 某些使用特殊音频引擎的游戏可能不受支持（未经测试）
 - 配置文件保存在程序目录下的 `gal_audio_controller_config.json` 中
+- 程序运行日志保存在程序目录下的 `bgm_controller.log` 文件中

@@ -1,3 +1,4 @@
 
 gal_audio_controller_config.json
 __pycache__/
+*.log
