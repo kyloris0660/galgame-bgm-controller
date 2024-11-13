@@ -10,6 +10,7 @@ import threading
 import sys
 import json
 import os
+import logging
 from pathlib import Path
 
 class AudioController:
@@ -53,7 +54,7 @@ class AudioController:
                     json.dump(default_config, f, ensure_ascii=False, indent=2)
                 return default_config
         except Exception as e:
-            print(f"加载配置文件失败: {e}")
+            logging.info(f"加载配置文件失败: {e}")
             return default_config
 
     def save_config(self):
@@ -68,7 +69,7 @@ class AudioController:
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"保存配置文件失败: {e}")
+            logging.info(f"保存配置文件失败: {e}")
 
     def add_to_history(self, process_name):
         """添加进程到历史记录"""
@@ -210,14 +211,14 @@ class AudioController:
             # 只有一个匹配的进程，自动选择
             self.target_pid, self.target_name = matching_processes[0]
             self.last_muted_state[self.target_pid] = False
-            print(f"自动选择进程: {self.target_name} (PID: {self.target_pid})")
+            logging.info(f"自动选择进程: {self.target_name} (PID: {self.target_pid})")
             return True
         elif len(matching_processes) > 1:
             # 有多个匹配的进程，让用户手动选择
-            print(f"找到多个匹配的进程: {[p[1] for p in matching_processes]}")
+            logging.info(f"找到多个匹配的进程: {[p[1] for p in matching_processes]}")
             return False
         else:
-            print("未找到匹配的历史进程")
+            logging.info("未找到匹配的历史进程")
             return False
 
     def restore_volume(self, pid):
@@ -230,7 +231,7 @@ class AudioController:
                     volume.SetMute(0, None)
                     break
         except Exception as e:
-            print(f"恢复音量失败: {e}")
+            logging.info(f"恢复音量失败: {e}")
 
     def restore_all_volumes(self):
         """恢复所有被跟踪进程的音量"""
@@ -241,7 +242,7 @@ class AudioController:
                     volume = session._ctl.QueryInterface(ISimpleAudioVolume)
                     volume.SetMute(0, None)
         except Exception as e:
-            print(f"恢复所有音量失败: {e}")
+            logging.info(f"恢复所有音量失败: {e}")
 
     def stop_monitoring(self):
         """停止监控并退出程序"""
@@ -267,7 +268,7 @@ class AudioController:
             self.update_icon_and_menu()
         else:
             # 如果没有选择新进程，恢复原来的进程
-            print("未选择新进程，保持原有设置")
+            logging.info("未选择新进程，保持原有设置")
 
     def select_target_process(self):
         """创建进程选择窗口"""
@@ -395,7 +396,7 @@ class AudioController:
     def monitor_target_app(self):
         """监控目标应用的音频状态"""
         if not self.target_pid:
-            print("请先选择要监控的程序！")
+            logging.info("请先选择要监控的程序！")
             return
 
         while self.running:
@@ -412,7 +413,7 @@ class AudioController:
                 
                 # 如果启用了自动关闭且目标进程不存在
                 if self.auto_close and not target_running:
-                    print(f"目标进程 {self.target_name} (PID: {self.target_pid}) 已结束，程序自动关闭")
+                    logging.info(f"目标进程 {self.target_name} (PID: {self.target_pid}) 已结束，程序自动关闭")
                     # 在自动关闭前确保保存配置
                     self.save_config()
                     self.stop_monitoring()
@@ -453,7 +454,7 @@ class AudioController:
                 time.sleep(1)
                 
             except Exception as e:
-                print(f"监控过程中出现错误: {e}")
+                logging.info(f"监控过程中出现错误: {e}")
                 time.sleep(1)
 
     def start(self):
@@ -477,14 +478,20 @@ class AudioController:
 def setup_logging():
     """设置日志输出"""
     log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bgm_controller.log')
-    sys.stdout = open(log_file, 'a', encoding='utf-8')
-    sys.stderr = sys.stdout
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file, encoding='utf-8'),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
 
 def main():
     setup_logging()  # 设置日志输出
-    print("\n" + "="*50)
-    print(f"程序启动时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    
+    logging.info("="*50)
+    logging.info("程序启动")
+
     controller = AudioController()
     controller.start()
 
