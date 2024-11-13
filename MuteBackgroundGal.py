@@ -20,22 +20,28 @@ class AudioController:
         self.monitoring_thread = None
         self.tray_icon = None
         self.paused = False
-        self.minimize_only = True
-        self.auto_close = True
-        self.auto_match = True  # 默认开启自动匹配
-        self.last_muted_state = {}
         self.history_processes = set()  # 先初始化为空集合
+        
         # 修改配置文件路径到当前目录
         current_dir = os.path.dirname(os.path.abspath(__file__))
         self.config_file = os.path.join(current_dir, 'gal_audio_controller_config.json')
         
         # 加载配置
         config = self.load_config()
-        self.history_processes = set(config.get('history_processes', []))  # 更新历史进程记录
+        self.history_processes = set(config.get('history_processes', []))
+        self.minimize_only = config.get('minimize_only', True)
+        self.auto_close = config.get('auto_close', True)
+        self.auto_match = config.get('auto_match', True)
+        self.last_muted_state = {}
 
     def load_config(self):
         """加载配置文件"""
-        default_config = {'history_processes': [], 'auto_match': True}
+        default_config = {
+            'history_processes': [],
+            'auto_match': True,
+            'minimize_only': True,
+            'auto_close': True
+        }
         try:
             if os.path.exists(self.config_file):
                 with open(self.config_file, 'r', encoding='utf-8') as f:
@@ -54,8 +60,10 @@ class AudioController:
         """保存配置文件"""
         try:
             config = {
-                'history_processes': list(self.history_processes),  # 转换集合为列表以便JSON序列化
-                'auto_match': self.auto_match
+                'history_processes': list(self.history_processes),
+                'auto_match': self.auto_match,
+                'minimize_only': self.minimize_only,
+                'auto_close': self.auto_close
             }
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
@@ -159,17 +167,19 @@ class AudioController:
     def toggle_minimize_only(self):
         """切换是否仅在最小化时静音"""
         self.minimize_only = not self.minimize_only
+        self.save_config()  # 保存设置
         self.update_icon_and_menu()
 
     def toggle_auto_close(self):
         """切换是否在目标进程结束时自动关闭"""
         self.auto_close = not self.auto_close
+        self.save_config()  # 保存设置
         self.update_icon_and_menu()
 
     def toggle_auto_match(self):
         """切换是否自动匹配历史进程"""
         self.auto_match = not self.auto_match
-        self.save_config()
+        self.save_config()  # 保存设置
         self.update_icon_and_menu()
 
     def clear_history(self):
@@ -237,6 +247,8 @@ class AudioController:
         """停止监控并退出程序"""
         self.running = False
         self.restore_all_volumes()
+        # 确保在退出前保存配置
+        self.save_config()
         if self.tray_icon:
             self.tray_icon.stop()
 
@@ -401,9 +413,12 @@ class AudioController:
                 # 如果启用了自动关闭且目标进程不存在
                 if self.auto_close and not target_running:
                     print(f"目标进程 {self.target_name} (PID: {self.target_pid}) 已结束，程序自动关闭")
+                    # 在自动关闭前确保保存配置
+                    self.save_config()
                     self.stop_monitoring()
                     break
 
+                # 如果处于暂停状态，不进行音频控制
                 if self.paused:
                     time.sleep(1)
                     continue
@@ -423,7 +438,7 @@ class AudioController:
                     if pid == self.target_pid:
                         # 确定是否应该静音
                         should_mute = (self.is_window_minimized(pid) if self.minimize_only 
-                                     else foreground_pid != pid)
+                                    else foreground_pid != pid)
 
                         # 更新静音状态
                         if should_mute != self.last_muted_state.get(pid, False):
@@ -435,11 +450,11 @@ class AudioController:
                         volume.SetMute(0, None)
                         del self.last_muted_state[pid]
 
+                time.sleep(1)
+                
             except Exception as e:
                 print(f"监控过程中出现错误: {e}")
                 time.sleep(1)
-
-            time.sleep(1)
 
     def start(self):
         """启动程序"""
