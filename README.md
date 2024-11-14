@@ -22,7 +22,7 @@
 - Python 3.6+
 - 管理员权限（用于控制音频）
 
-## 使用方法
+## 从源码运行
 
 1. 克隆仓库：
 
@@ -34,25 +34,51 @@ cd galgame-bgm-controller
 2. 安装依赖：
 
 ```bash
-pip install pycaw psutil pywin32 pytk pillow pystray
+pip install pycaw psutil pywin32 pillow pytk pystray
 ```
 
 3. 运行程序：
 
-- 直接双击 `start.pyw` 运行（推荐）
-- 或者命令行运行：`pythonw start.pyw`
+```bash
+python start.pyw
+```
 
+## 从源码构建
+
+1. 安装额外的构建依赖：
+
+```bash
+pip install pyinstaller
+```
+
+2. 运行构建脚本：
+
+```bash
+python build.py
+```
+
+3. 构建完成后，可执行文件将位于 `dist` 目录中
+
+## 直接使用可执行文件（未测试）
+
+1. 下载最新版本的 `GalgameBGMController.zip`
+2. 解压到任意目录
+3. 运行 `GalgameBGMController.exe`（需要管理员权限）
 4. 在弹出的窗口中选择需要控制的Galgame进程（历史记录将显示为绿色背景）
-5. 程序会自动监控选定游戏的音频状态，并在后台运行
-6. 使用托盘图标右键菜单可以：
-   - 查看当前监控状态
-   - 暂停/继续监控
-   - 切换静音模式（仅最小化/非前台）
-   - 开关进程结束自动关闭
-   - 开关自动匹配历史进程
-   - 重新选择进程
-   - 清空历史记录
-   - 退出程序
+5. 程序会自动监控选定游戏的音频状态，可在托盘中找到
+
+## 系统托盘功能
+
+右键点击系统托盘图标可以：
+
+- 查看当前监控状态
+- 暂停/继续监控
+- 切换静音模式（仅最小化/非前台）
+- 开关进程结束自动关闭
+- 开关自动匹配历史进程
+- 重新选择进程
+- 清空历史记录
+- 退出程序
 
 ## 注意事项
 
