@@ -35,7 +35,7 @@
 
 ## 📝 注意事项
 
-- 建议在启动游戏前运行本程序
+- 强烈建议在启动游戏后运行本程序
 - 程序运行时生成的文件位于 `GalgameBGMController/_internal` 目录：
   - `gal_audio_controller_config.json`：配置文件
   - `bgm_controller.log`：日志文件
