@@ -41,7 +41,7 @@ class AudioController:
             'history_processes': [],
             'auto_match': True,
             'minimize_only': True,
-            'auto_close': True
+            'auto_close': False
         }
         try:
             if os.path.exists(self.config_file):
@@ -106,11 +106,6 @@ class AudioController:
         """创建托盘菜单"""
         return pystray.Menu(
             pystray.MenuItem("Galgame音频控制器", None, enabled=False),
-            pystray.MenuItem(
-                f"当前进程: {self.target_name if self.target_name else '未选择'}", 
-                None, 
-                enabled=False
-            ),
             pystray.MenuItem(
                 f"状态: {'已暂停' if self.paused else '监控中'}", 
                 None, 
@@ -218,7 +213,7 @@ class AudioController:
             logging.info(f"找到多个匹配的进程: {[p[1] for p in matching_processes]}")
             return False
         else:
-            logging.info("未找到匹配的历史进程")
+            # logging.info("未找到匹配的历史进程")
             return False
 
     def restore_volume(self, pid):
@@ -401,6 +396,12 @@ class AudioController:
 
         while self.running:
             try:
+                # 若未选定目标进程，尝试自动匹配（包括历史中多个可能的进程，只要只有一个符合条件时会自动选择）
+                if not self.target_pid:
+                    if not self.auto_select_process():
+                        time.sleep(1)
+                        continue
+
                 # 检查目标进程是否仍在运行
                 target_running = False
                 sessions = AudioUtilities.GetAllSessions()
@@ -410,16 +411,21 @@ class AudioController:
                     if session.Process and session.Process.pid == self.target_pid:
                         target_running = True
                         break
-                
-                # 如果启用了自动关闭且目标进程不存在
-                if self.auto_close and not target_running:
-                    logging.info(f"目标进程 {self.target_name} (PID: {self.target_pid}) 已结束，程序自动关闭")
-                    # 在自动关闭前确保保存配置
-                    self.save_config()
-                    self.stop_monitoring()
-                    break
 
-                # 如果处于暂停状态，不进行音频控制
+                if not target_running:
+                    if self.auto_close:
+                        logging.info(f"目标进程 {self.target_name} (PID: {self.target_pid}) 已结束，程序自动关闭")
+                        # 在自动关闭前确保保存配置
+                        self.save_config()
+                        self.stop_monitoring()
+                        break
+                    else:
+                        # logging.info(f"目标进程 {self.target_name} (PID: {self.target_pid}) 已结束，等待进程重新启动...")
+                        self.target_pid = None
+                        self.target_name = None
+                        time.sleep(1)
+                        continue
+
                 if self.paused:
                     time.sleep(1)
                     continue
