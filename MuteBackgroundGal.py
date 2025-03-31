@@ -15,8 +15,7 @@ from pathlib import Path
 
 class AudioController:
     def __init__(self):
-        self.target_pid = None
-        self.target_name = None
+        self.target_processes = {}  # 改为字典，存储 {pid: name} 的映射
         self.running = True
         self.monitoring_thread = None
         self.tray_icon = None
@@ -104,6 +103,30 @@ class AudioController:
 
     def create_menu(self):
         """创建托盘菜单"""
+        def add_process_callback(icon, item):
+            self.add_process()
+            
+        def manage_processes_callback(icon, item):
+            self.manage_processes()
+            
+        def toggle_pause_callback(icon, item):
+            self.toggle_pause()
+            
+        def toggle_minimize_callback(icon, item):
+            self.toggle_minimize_only()
+            
+        def toggle_auto_close_callback(icon, item):
+            self.toggle_auto_close()
+            
+        def toggle_auto_match_callback(icon, item):
+            self.toggle_auto_match()
+            
+        def clear_history_callback(icon, item):
+            self.clear_history()
+            
+        def stop_monitoring_callback(icon, item):
+            self.stop_monitoring()
+
         return pystray.Menu(
             pystray.MenuItem("Galgame音频控制器", None, enabled=False),
             pystray.MenuItem(
@@ -113,34 +136,38 @@ class AudioController:
             ),
             pystray.MenuItem(
                 f"{'继续监控' if self.paused else '暂停监控'}", 
-                self.toggle_pause
+                toggle_pause_callback
             ),
             pystray.MenuItem(
                 "仅最小化时静音",
-                self.toggle_minimize_only,
+                toggle_minimize_callback,
                 checked=lambda item: self.minimize_only
             ),
             pystray.MenuItem(
                 "进程结束时自动关闭",
-                self.toggle_auto_close,
+                toggle_auto_close_callback,
                 checked=lambda item: self.auto_close
             ),
             pystray.MenuItem(
                 "自动匹配历史进程",
-                self.toggle_auto_match,
+                toggle_auto_match_callback,
                 checked=lambda item: self.auto_match
             ),
             pystray.MenuItem(
-                "重新选择进程",
-                self.reselect_process
+                "添加监控进程",
+                add_process_callback
+            ),
+            pystray.MenuItem(
+                "管理监控进程",
+                manage_processes_callback
             ),
             pystray.MenuItem(
                 "清空历史记录",
-                self.clear_history
+                clear_history_callback
             ),
             pystray.MenuItem(
                 "退出程序",
-                self.stop_monitoring
+                stop_monitoring_callback
             )
         )
 
@@ -156,8 +183,8 @@ class AudioController:
     def toggle_pause(self):
         """切换暂停状态"""
         self.paused = not self.paused
-        if self.paused and self.target_pid:
-            self.restore_volume(self.target_pid)
+        if self.paused and self.target_processes:
+            self.restore_volume(self.target_processes.keys())
         self.update_icon_and_menu()
 
     def toggle_minimize_only(self):
@@ -200,31 +227,32 @@ class AudioController:
         if not self.auto_match or not self.history_processes:
             return False
             
-        matching_processes = self.find_matching_processes()
+        found_new_process = False
+        sessions = AudioUtilities.GetAllSessions()
         
-        if len(matching_processes) == 1:
-            # 只有一个匹配的进程，自动选择
-            self.target_pid, self.target_name = matching_processes[0]
-            self.last_muted_state[self.target_pid] = False
-            logging.info(f"自动选择进程: {self.target_name} (PID: {self.target_pid})")
-            return True
-        elif len(matching_processes) > 1:
-            # 有多个匹配的进程，让用户手动选择
-            logging.info(f"找到多个匹配的进程: {[p[1] for p in matching_processes]}")
-            return False
-        else:
-            # logging.info("未找到匹配的历史进程")
-            return False
+        for session in sessions:
+            if session.Process and session.Process.name() in self.history_processes:
+                pid = session.Process.pid
+                # 只添加还未在监控列表中的进程
+                if pid not in self.target_processes:
+                    self.target_processes[pid] = session.Process.name()
+                    self.last_muted_state[pid] = False
+                    logging.info(f"自动添加进程: {session.Process.name()} (PID: {pid})")
+                    found_new_process = True
+        
+        return found_new_process
 
-    def restore_volume(self, pid):
+    def restore_volume(self, pids):
         """恢复指定进程的音量"""
+        if not isinstance(pids, (list, set)):
+            pids = [pids]
+            
         try:
             sessions = AudioUtilities.GetAllSessions()
             for session in sessions:
-                if session.Process and session.Process.pid == pid:
+                if session.Process and session.Process.pid in pids:
                     volume = session._ctl.QueryInterface(ISimpleAudioVolume)
                     volume.SetMute(0, None)
-                    break
         except Exception as e:
             logging.info(f"恢复音量失败: {e}")
 
@@ -248,32 +276,91 @@ class AudioController:
         if self.tray_icon:
             self.tray_icon.stop()
 
-    def reselect_process(self):
-        """重新选择要监控的进程"""
-        if self.target_pid:
-            self.restore_volume(self.target_pid)
-        
-        # 强制显示选择窗口，不进行自动匹配
-        temp_auto_match = self.auto_match  # 保存当前自动匹配设置
-        self.auto_match = False  # 临时关闭自动匹配
-        success = self.select_target_process()  # 显示选择窗口
-        self.auto_match = temp_auto_match  # 恢复自动匹配设置
-        
-        if success:
-            self.update_icon_and_menu()
-        else:
-            # 如果没有选择新进程，恢复原来的进程
-            logging.info("未选择新进程，保持原有设置")
+    def add_process(self, icon=None, item=None):
+        """添加新的监控进程"""
+        # 直接显示进程选择窗口，不进行自动匹配
+        self.select_target_process(skip_auto_match=True)
+        self.update_icon_and_menu()
 
-    def select_target_process(self):
+    def manage_processes(self):
+        """管理当前监控的进程"""
+        if not self.target_processes:
+            messagebox.showinfo("提示", "当前没有监控的进程")
+            return
+            
+        root = tk.Tk()
+        root.title("管理监控进程")
+        root.geometry("400x300")
+        
+        # 创建主框架
+        main_frame = ttk.Frame(root)
+        main_frame.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
+        
+        # 添加标签
+        ttk.Label(main_frame, text="当前监控的进程:").pack(anchor='w')
+        
+        # 创建列表框和滚动条
+        list_frame = ttk.Frame(main_frame)
+        list_frame.pack(expand=True, fill=tk.BOTH, pady=(5,0))
+        
+        listbox = tk.Listbox(list_frame)
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=listbox.yview)
+        listbox.configure(yscrollcommand=scrollbar.set)
+        
+        # 填充数据
+        for pid, name in self.target_processes.items():
+            listbox.insert(tk.END, f"{name} (PID: {pid})")
+        
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # 按钮框架
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=10)
+        
+        def remove_selected():
+            selected = listbox.curselection()
+            if not selected:
+                messagebox.showwarning("提示", "请先选择一个进程")
+                return
+                
+            # 从列表中获取PID
+            item_text = listbox.get(selected[0])
+            pid = int(item_text.split("PID: ")[1].strip(")"))
+            
+            # 恢复音量并移除进程
+            self.restore_volume(pid)
+            if pid in self.target_processes:
+                del self.target_processes[pid]
+            if pid in self.last_muted_state:
+                del self.last_muted_state[pid]
+                
+            # 更新列表
+            listbox.delete(selected[0])
+        
+        ttk.Button(button_frame, text="移除选中进程", command=remove_selected).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="关闭", command=root.destroy).pack(side=tk.RIGHT, padx=5)
+        
+        # 窗口居中显示
+        root.update_idletasks()
+        width = root.winfo_width()
+        height = root.winfo_height()
+        x = (root.winfo_screenwidth() // 2) - (width // 2)
+        y = (root.winfo_screenheight() // 2) - (height // 2)
+        root.geometry(f'{width}x{height}+{x}+{y}')
+        
+        root.mainloop()
+
+    def select_target_process(self, skip_auto_match=False):
         """创建进程选择窗口"""
-        # 先尝试自动匹配
-        if self.auto_match and self.auto_select_process():
+        # 只在启动时自动匹配，手动添加进程时跳过自动匹配
+        if not skip_auto_match and self.auto_match and self.auto_select_process():
             return True
 
         root = tk.Tk()
         root.title("选择要监控的程序")
         root.geometry("400x450")
+        root.attributes('-topmost', True)  # 窗口置顶
 
         # 创建主框架
         main_frame = ttk.Frame(root)
@@ -303,7 +390,12 @@ class AudioController:
         sessions = AudioUtilities.GetAllSessions()
         for session in sessions:
             if session.Process:
-                item = tree.insert('', tk.END, values=(session.Process.pid, session.Process.name()))
+                pid = session.Process.pid
+                # 跳过已经在监控列表中的进程
+                if pid in self.target_processes:
+                    continue
+                    
+                item = tree.insert('', tk.END, values=(pid, session.Process.name()))
                 if session.Process.name() in self.history_processes:
                     matched_items.append(item)
                     tree.item(item, tags=('history',))
@@ -319,18 +411,14 @@ class AudioController:
             tree.selection_set(matched_items[0])
             tree.see(matched_items[0])
 
-        selected_result = False  # 用于跟踪是否成功选择了进程
-
         def on_select():
-            nonlocal selected_result
             selected_item = tree.selection()
             if selected_item:
                 pid, name = tree.item(selected_item[0])['values']
-                self.target_pid = pid
-                self.target_name = name
+                pid = int(pid)  # 确保 pid 是整数
+                self.target_processes[pid] = name
                 self.last_muted_state[pid] = False
                 self.add_to_history(name)  # 添加到历史记录
-                selected_result = True
                 root.destroy()
             else:
                 messagebox.showwarning("提示", "请先选择一个进程")
@@ -351,17 +439,9 @@ class AudioController:
         tree.bind('<Double-1>', lambda e: on_select())
         
         # 处理窗口关闭
-        def on_closing():
-            nonlocal selected_result
-            if not selected_result:
-                self.target_pid = None
-                self.target_name = None
-            root.destroy()
-            
-        root.protocol("WM_DELETE_WINDOW", on_closing)
+        root.protocol("WM_DELETE_WINDOW", root.destroy)
         
         root.mainloop()
-        return selected_result  # 返回是否选择了进程
 
     def is_window_minimized(self, pid):
         """检查指定进程的窗口是否最小化"""
@@ -390,59 +470,62 @@ class AudioController:
 
     def monitor_target_app(self):
         """监控目标应用的音频状态"""
-        if not self.target_pid:
-            logging.info("请先选择要监控的程序！")
-            return
-
         while self.running:
             try:
-                # 若未选定目标进程，尝试自动匹配（包括历史中多个可能的进程，只要只有一个符合条件时会自动选择）
-                if not self.target_pid:
-                    if not self.auto_select_process():
-                        time.sleep(1)
-                        continue
-
-                # 检查目标进程是否仍在运行
-                target_running = False
-                sessions = AudioUtilities.GetAllSessions()
-                
-                # 首先检查目标进程是否存在
-                for session in sessions:
-                    if session.Process and session.Process.pid == self.target_pid:
-                        target_running = True
-                        break
-
-                if not target_running:
-                    if self.auto_close:
-                        logging.info(f"目标进程 {self.target_name} (PID: {self.target_pid}) 已结束，程序自动关闭")
-                        # 在自动关闭前确保保存配置
-                        self.save_config()
-                        self.stop_monitoring()
-                        break
-                    else:
-                        # logging.info(f"目标进程 {self.target_name} (PID: {self.target_pid}) 已结束，等待进程重新启动...")
-                        self.target_pid = None
-                        self.target_name = None
-                        time.sleep(1)
-                        continue
+                # 不管是否有目标进程，都尝试自动匹配新进程
+                if self.auto_match:
+                    self.auto_select_process()
+                    
+                if not self.target_processes:
+                    time.sleep(1)
+                    continue
 
                 if self.paused:
                     time.sleep(1)
                     continue
 
+                # 获取当前所有音频会话
+                sessions = AudioUtilities.GetAllSessions()
+                
+                # 检查目标进程是否仍在运行，移除已结束的进程
+                active_pids = set()
+                for session in sessions:
+                    if session.Process:
+                        active_pids.add(session.Process.pid)
+                
+                # 移除已结束的进程
+                ended_processes = []
+                for pid in list(self.target_processes.keys()):
+                    if pid not in active_pids:
+                        ended_processes.append((pid, self.target_processes[pid]))
+                        del self.target_processes[pid]
+                        if pid in self.last_muted_state:
+                            del self.last_muted_state[pid]
+                
+                # 如果所有进程都结束且设置了自动关闭
+                if ended_processes and not self.target_processes and self.auto_close:
+                    process_names = ", ".join([name for _, name in ended_processes])
+                    logging.info(f"所有监控进程已结束: {process_names}，程序自动关闭")
+                    self.save_config()
+                    self.stop_monitoring()
+                    break
+                
                 foreground_pid = self.get_foreground_window_pid()
                 if not foreground_pid:
                     time.sleep(1)
                     continue
 
+                # 处理每个音频会话
                 for session in sessions:
                     if not session.Process:
                         continue
 
-                    volume = session._ctl.QueryInterface(ISimpleAudioVolume)
                     pid = session.Process.pid
-
-                    if pid == self.target_pid:
+                    
+                    # 只处理我们监控的进程
+                    if pid in self.target_processes:
+                        volume = session._ctl.QueryInterface(ISimpleAudioVolume)
+                        
                         # 确定是否应该静音
                         should_mute = (self.is_window_minimized(pid) if self.minimize_only 
                                     else foreground_pid != pid)
@@ -451,11 +534,6 @@ class AudioController:
                         if should_mute != self.last_muted_state.get(pid, False):
                             volume.SetMute(should_mute, None)
                             self.last_muted_state[pid] = should_mute
-                    
-                    # 恢复非目标进程的音量
-                    elif pid in self.last_muted_state and self.last_muted_state[pid]:
-                        volume.SetMute(0, None)
-                        del self.last_muted_state[pid]
 
                 time.sleep(1)
                 
@@ -465,12 +543,12 @@ class AudioController:
 
     def start(self):
         """启动程序"""
-        # 先选择进程
-        self.select_target_process()
-        if not self.target_pid:
-            return
+        # 先尝试自动匹配进程
+        if not self.auto_select_process():
+            # 如果没有自动匹配到，则显示选择窗口
+            self.select_target_process()
             
-        # 再创建托盘图标
+        # 创建托盘图标
         self.create_tray_icon()
         
         # 启动监控线程
