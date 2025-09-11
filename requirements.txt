@@ -1,0 +1,7 @@
+psutil>=5.9.0
+pywin32>=306
+pycaw>=20240210
+comtypes==1.2.1
+Pillow>=10.0.0
+pystray>=0.19.5
+pytest>=8.0.0

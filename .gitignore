@@ -1,5 +1,24 @@
+# 编译产物
+/dist/
+/build/GalBGMController/
+/build/__pycache__/
+/build/GalBGMController-single/
+/core/__pycache__/
+/__pycache__/
+/*.spec
 
-gal_audio_controller_config.json
-__pycache__/
-dist/
+# 用户配置文件
+config.json
+
+# PyInstaller 缓存
+*.manifest
+*.pyd
+*.pyc
+*.dll
+*.exe
+
+# 编辑器和系统文件
+.vscode/
 *.log
+Thumbs.db
+.DS_Store
