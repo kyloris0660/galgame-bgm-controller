@@ -1,0 +1,19 @@
+# ---- Local config ----
+gal_audio_controller_config.json
+
+# ---- Python cache ----
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ---- Build / Dist ----
+*.egg-info/
+dist/
+build/
+
+# ---- IDE / OS temp ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

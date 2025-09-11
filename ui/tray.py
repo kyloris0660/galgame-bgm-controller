@@ -1,18 +1,20 @@
+# ui/tray.py
 from PIL import Image, ImageDraw
+from core.icons import get_exe_icon_pil
 
 try:
     import pystray
 
-    HAVE_PYSTRAY = True
+    HAVE = True
 except Exception:
-    HAVE_PYSTRAY = False
+    HAVE = False
 
 
-def _default_image():
+def _default_img():
     img = Image.new("RGBA", (64, 64), (255, 255, 255, 0))
     d = ImageDraw.Draw(img)
     d.ellipse((8, 8, 56, 56), outline=(0, 0, 0), width=3)
-    d.rectangle((22, 22, 42, 42), fill=(0, 0, 0))
+    d.rectangle((24, 24, 40, 40), fill=(0, 0, 0))
     return img
 
 
@@ -24,12 +26,10 @@ class Tray:
         self.on_mode_change = on_mode_change
         self.get_mode = get_mode
         self.icon = None
-        self.img = _default_image()
+        self._img_default = _default_img()
 
     def start(self):
-        if not HAVE_PYSTRAY:
-            return
-        if self.icon:
+        if not HAVE or self.icon:
             return
 
         def _mode_label(item):
@@ -37,17 +37,11 @@ class Tray:
 
         def _to_not_fg(icon, item):
             self.on_mode_change("not_foreground")
-            try:
-                self.icon.update_menu()
-            except Exception:
-                pass
+            self.icon.update_menu()
 
         def _to_min(icon, item):
             self.on_mode_change("minimized_only")
-            try:
-                self.icon.update_menu()
-            except Exception:
-                pass
+            self.icon.update_menu()
 
         menu = pystray.Menu(
             pystray.MenuItem("选择监听软件", lambda: self.on_select() or None),
@@ -63,7 +57,9 @@ class Tray:
             pystray.MenuItem("暂停/继续", lambda: self.on_pause() or None),
             pystray.MenuItem("退出", lambda: self.on_quit() or None),
         )
-        self.icon = pystray.Icon("gal_bgm_controller", self.img, "BGM Controller", menu)
+        self.icon = pystray.Icon(
+            "bgm_controller", self._img_default, "BGM Controller", menu
+        )
         self.icon.run_detached()
 
     def stop(self):
@@ -73,12 +69,14 @@ class Tray:
             except Exception:
                 pass
 
-    def update_icon_from_exe(self, exe_path: str):
-        # 简化：可拓展为真实图标
-        pass
-
-    def reset_icon_default(self):
-        pass
-
-    def notify(self, text: str):
-        pass
+    def set_icon_from_exe(self, exe_path: str | None):
+        """将托盘图标设为该 exe 的图标；传 None/空则回到默认。"""
+        if not self.icon:
+            return
+        if not exe_path:
+            self.icon.icon = self._img_default
+            self.icon.visible = True
+            return
+        pil = get_exe_icon_pil(exe_path, large=True)
+        self.icon.icon = pil
+        self.icon.visible = True

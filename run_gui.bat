@@ -1,4 +1,4 @@
 @echo off
-pip install -r requirements.txt
-python app_gui.py
+set PY=py -3.13
+%PY% app_gui.py
 pause
