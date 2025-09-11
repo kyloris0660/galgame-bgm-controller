@@ -1,4 +1,3 @@
-# core/icons.py
 from PIL import Image
 import os
 
@@ -16,7 +15,6 @@ _ICON_CACHE = {}
 
 
 def get_exe_icon_pil(exe_path: str, large=True) -> Image.Image:
-    """从 exe 抽取图标（PIL），带缓存；失败返回占位图。"""
     if not exe_path:
         return _placeholder()
     key = (exe_path, large)
@@ -26,15 +24,21 @@ def get_exe_icon_pil(exe_path: str, large=True) -> Image.Image:
         img = _placeholder()
         _ICON_CACHE[key] = img
         return img
+    img = None
+    large_icons = []
+    small_icons = []
     try:
         large_icons, small_icons = win32gui.ExtractIconEx(exe_path, 0)
         hicon = (large_icons or small_icons)[0]
+        target = 32  # 统一缩放到 32x32 更稳
         ico_x = win32api.GetSystemMetrics(
             win32con.SM_CXICON if large else win32con.SM_CXSMICON
         )
         ico_y = win32api.GetSystemMetrics(
             win32con.SM_CYICON if large else win32con.SM_CYSMICON
         )
+        ico_x = max(16, min(256, ico_x))
+        ico_y = max(16, min(256, ico_y))
         hdc = win32ui.CreateDCFromHandle(win32gui.GetDC(0))
         hbmp = win32ui.CreateBitmap()
         hbmp.CreateCompatibleBitmap(hdc, ico_x, ico_y)
@@ -54,6 +58,8 @@ def get_exe_icon_pil(exe_path: str, large=True) -> Image.Image:
             0,
             1,
         ).convert("RGBA")
+        if img.size != (target, target):
+            img = img.resize((target, target), Image.LANCZOS)
     except Exception:
         img = _placeholder()
     finally:
@@ -67,4 +73,4 @@ def get_exe_icon_pil(exe_path: str, large=True) -> Image.Image:
 
 
 def _placeholder() -> Image.Image:
-    return Image.new("RGBA", (48, 48), (0, 0, 0, 0))
+    return Image.new("RGBA", (32, 32), (0, 0, 0, 0))

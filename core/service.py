@@ -1,11 +1,9 @@
-# core/service.py
 import threading
 import time
-from typing import Optional, Callable, Dict
+from typing import Optional, Callable, Dict, List
 from .config import Config
 from .policy import apply_policy
 from .audio import AudioPort
-from . import debug as dbg
 
 try:
     import comtypes
@@ -16,8 +14,6 @@ except Exception:
 
 
 class Service:
-    """读取状态 -> 策略 -> 执行静音；变化才回调 on_apply(actions, muted_list, active_exe)"""
-
     def __init__(
         self,
         cfg: Config,
@@ -25,7 +21,7 @@ class Service:
         focus,
         interval: float = 0.5,
         on_apply: Optional[
-            Callable[[Dict[str, bool], list, Optional[str]], None]
+            Callable[[Dict[str, bool], List[str], Optional[str]], None]
         ] = None,
     ):
         self.cfg = cfg
@@ -36,8 +32,8 @@ class Service:
         self._pause = threading.Event()
         self.thread = None
         self.on_apply = on_apply
-        self._last_actions = None
-        self._last_active = None
+        self._last_actions: Optional[Dict[str, bool]] = None
+        self._last_active: Optional[str] = None
 
     def start(self):
         if self.thread and self.thread.is_alive():
@@ -49,8 +45,11 @@ class Service:
         )
         self.thread.start()
 
-    def stop(self):
+    def stop(self, wait: float = 3.0):
         self._stop.set()
+        self._graceful_unmute_all()
+        if self.thread:
+            self.thread.join(timeout=wait)
 
     def pause(self):
         self._pause.set()
@@ -76,21 +75,12 @@ class Service:
                     snap = self.focus.snapshot(targets)
                     mode = self.cfg.get_mode()
                     actions = apply_policy(snap, mode)
-                    # 变化才执行/回调
                     if (
                         actions != self._last_actions
                         or snap.active_exe != self._last_active
                     ):
                         self.audio.set_bulk(actions)
                         muted = [exe for exe, m in actions.items() if m]
-                        dbg.log_change(
-                            "apply",
-                            {
-                                "mode": mode.value,
-                                "active": snap.active_exe,
-                                "actions": actions,
-                            },
-                        )
                         if self.on_apply:
                             try:
                                 self.on_apply(actions, muted, snap.active_exe)
@@ -99,6 +89,39 @@ class Service:
                         self._last_actions = dict(actions)
                         self._last_active = snap.active_exe
                 time.sleep(self.interval)
+        finally:
+            if com_inited:
+                try:
+                    comtypes.CoUninitialize()
+                except Exception:
+                    pass
+
+    def _graceful_unmute_all(self):
+        com_inited = False
+        if HAVE_COM:
+            try:
+                comtypes.CoInitialize()
+                com_inited = True
+            except Exception:
+                pass
+        try:
+            muted_now = []
+            if self._last_actions:
+                for exe, m in self._last_actions.items():
+                    if m:
+                        muted_now.append(exe)
+            cfg_targets = [t.lower() for t in self.cfg.get_targets()]
+            uniq = {}
+            for exe in muted_now + cfg_targets:
+                uniq[exe] = True
+            if hasattr(self.audio, "unmute_multi"):
+                self.audio.unmute_multi(list(uniq.keys()))
+            else:
+                for exe in uniq.keys():
+                    try:
+                        self.audio.unmute_by_exe(exe)
+                    except Exception:
+                        pass
         finally:
             if com_inited:
                 try:
