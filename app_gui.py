@@ -15,15 +15,19 @@ class App:
         self.root = tk.Tk()
         self.root.title("Galgame BGM Controller – v5")
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
+
         frm = ttk.Frame(self.root, padding=10)
         frm.pack(fill="both", expand=True)
+
         top = ttk.Frame(frm)
         top.pack(fill="x")
         self.lbl = ttk.Label(top, text="初始化…")
         self.lbl.pack(side="left")
+
         ttk.Label(frm, text="监听目标：").pack(anchor="w", pady=(6, 0))
         self.lst = tk.Listbox(frm, height=6)
         self.lst.pack(fill="both", expand=True, pady=(2, 6))
+
         btns = ttk.Frame(frm)
         btns.pack(fill="x")
         ttk.Button(btns, text="选择监听软件（可多选）", command=self.pick).pack(
@@ -33,19 +37,23 @@ class App:
             side="left", padx=(8, 0)
         )
         ttk.Button(btns, text="退出", command=self.quit).pack(side="right")
+
         self.cfg = Config()
         self.audio = PycawAudio()
         self.focus = WinFocus()
         self.svc = Service(
             self.cfg, self.audio, self.focus, interval=0.5, on_apply=self._on_apply
         )
+
+        # 关键：托盘回调切回 Tk 主线程
         self.tray = Tray(
-            on_select=self.pick,
-            on_pause=self.toggle_pause,
-            on_quit=self.quit,
-            on_mode_change=self.change_mode,
+            on_select=lambda: self.root.after(0, self.pick),
+            on_pause=lambda: self.root.after(0, self.toggle_pause),
+            on_quit=lambda: self.root.after(0, self.quit),
+            on_mode_change=lambda s: self.root.after(0, lambda: self.change_mode(s)),
             get_mode=lambda: self.cfg.get_mode().value,
         )
+
         self.paused = False
         self.root.after(0, self.start)
 
@@ -101,7 +109,8 @@ class App:
 
     def _on_apply(self, actions: dict, muted_list: list, active_exe: str | None):
         exe = muted_list[0] if muted_list else None
-        self.tray.set_icon_from_exe(exe)
+        # 关键：后台回调切回 Tk 主线程更新托盘图标
+        self.root.after(0, lambda: self.tray.set_icon_from_exe(exe if exe else None))
 
     def quit(self):
         try:
