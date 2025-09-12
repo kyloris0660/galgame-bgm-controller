@@ -14,7 +14,8 @@ class App:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Galgame BGM Controller – v5")
-        self.root.protocol("WM_DELETE_WINDOW", self.quit)
+        # X 号不退出，只最小化到托盘
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close_to_tray)
 
         frm = ttk.Frame(self.root, padding=10)
         frm.pack(fill="both", expand=True)
@@ -45,34 +46,120 @@ class App:
             self.cfg, self.audio, self.focus, interval=0.5, on_apply=self._on_apply
         )
 
-        # 关键：托盘回调切回 Tk 主线程
+        # 关键：托盘回调一律切回 Tk 主线程
         self.tray = Tray(
             on_select=lambda: self.root.after(0, self.pick),
             on_pause=lambda: self.root.after(0, self.toggle_pause),
             on_quit=lambda: self.root.after(0, self.quit),
             on_mode_change=lambda s: self.root.after(0, lambda: self.change_mode(s)),
             get_mode=lambda: self.cfg.get_mode().value,
+            on_show=lambda: self.root.after(0, self.show_main),  # 传入新回调
         )
 
+        # 状态
         self.paused = False
+        self._picker = None  # 选择器单例
+        self._hidden_to_tray = False  # 是否被托盘隐藏
+
         self.root.after(0, self.start)
 
+    # ---------- 托盘最小化/恢复 ----------
+    def on_close_to_tray(self):
+        self.hide_to_tray()
+
+    def hide_to_tray(self):
+        try:
+            self._hidden_to_tray = True
+            # withdraw: 从任务栏消失，仅托盘驻留
+            self.root.withdraw()
+        except Exception:
+            pass
+
+    def show_main(self):
+        try:
+            self._hidden_to_tray = False
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+        except Exception:
+            pass
+
+    def _ensure_for_dialog(self):
+        """
+        确保能够创建模态对话框：
+        - 若窗体 withdraw/iconify，则临时显示出来
+        - 返回一个回调，供对话框关闭后恢复原状态
+        """
+        was_hidden = False
+        try:
+            state = str(self.root.state())
+            if state in ("withdrawn", "iconic"):
+                was_hidden = True
+        except Exception:
+            was_hidden = self._hidden_to_tray
+
+        if was_hidden:
+            self.show_main()
+            self.root.update_idletasks()
+
+        def restore():
+            if was_hidden or self._hidden_to_tray:
+                self.hide_to_tray()
+
+        return restore
+
+    # ---------- 生命周期 ----------
     def start(self):
         self.tray.start()
         self._refresh_targets()
         self.lbl.config(text=f"状态：运行中（规则：{self.cfg.get_mode().value}）")
         self.svc.start()
 
+    # ---------- 进程选择 ----------
     def pick(self):
-        dlg = ProcessPicker(self.root, multiselect=True)
+        # 如果已经打开，就唤醒置顶
+        try:
+            if self._picker and self._picker.winfo_exists():
+                try:
+                    self._picker.deiconify()
+                    self._picker.lift()
+                    self._picker.focus_force()
+                    self._picker.attributes("-topmost", True)
+                    self._picker.after(
+                        200, lambda: self._picker.attributes("-topmost", False)
+                    )
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
+
+        # 确保可以创建模态对话框
+        restore = self._ensure_for_dialog()
+
+        # 新建对话框
+        try:
+            dlg = ProcessPicker(self.root, multiselect=True)
+            self._picker = dlg
+        except Exception:
+            messagebox.showerror("错误", "无法打开进程选择器，请重试。")
+            self._picker = None
+            restore()
+            return
+
+        # 等待对话框关闭
         self.root.wait_window(dlg)
-        if dlg.result:
+        self._picker = None
+        restore()
+
+        if getattr(dlg, "result", None):
             cur = {t.lower(): t for t in self.cfg.get_targets()}
             for e in dlg.result:
                 cur[e.lower()] = e
             self.cfg.set_targets(list(cur.values()))
             self._refresh_targets()
 
+    # ---------- 列表维护 ----------
     def remove_selected(self):
         idxs = list(self.lst.curselection())
         if not idxs:
@@ -90,6 +177,7 @@ class App:
         for t in self.cfg.get_targets():
             self.lst.insert("end", t)
 
+    # ---------- 行为 ----------
     def change_mode(self, mode_str: str):
         try:
             self.cfg.set_mode(MuteMode(mode_str))
@@ -109,9 +197,10 @@ class App:
 
     def _on_apply(self, actions: dict, muted_list: list, active_exe: str | None):
         exe = muted_list[0] if muted_list else None
-        # 关键：后台回调切回 Tk 主线程更新托盘图标
+        # 后台 -> 主线程更新托盘图标
         self.root.after(0, lambda: self.tray.set_icon_from_exe(exe if exe else None))
 
+    # ---------- 退出 ----------
     def quit(self):
         try:
             self.svc.stop()

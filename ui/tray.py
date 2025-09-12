@@ -18,15 +18,16 @@ def _default_img():
 
 
 class Tray:
-    def __init__(self, on_select, on_pause, on_quit, on_mode_change, get_mode):
+    def __init__(self, on_select, on_pause, on_quit, on_mode_change, get_mode, on_show):
         self.on_select = on_select
         self.on_pause = on_pause
         self.on_quit = on_quit
         self.on_mode_change = on_mode_change
         self.get_mode = get_mode
+        self.on_show = on_show  # 新增：显示主界面
         self.icon = None
         self._img_default = _default_img()
-        self._current_img = self._img_default  # 关键：强引用，防止被 GC
+        self._current_img = self._img_default  # 强引用，防止被 GC
 
     def start(self):
         if not HAVE or self.icon:
@@ -50,6 +51,7 @@ class Tray:
                 pass
 
         menu = pystray.Menu(
+            pystray.MenuItem("显示主界面", lambda: self.on_show() or None),  # 新增项
             pystray.MenuItem("选择监听软件", lambda: self.on_select() or None),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
@@ -66,7 +68,6 @@ class Tray:
         self.icon = pystray.Icon(
             "bgm_controller", self._img_default, "BGM Controller", menu
         )
-        # run_detached 更稳；也可以 self.icon.run(lambda: None) 但会阻塞
         self.icon.run_detached()
 
     def stop(self):
@@ -90,11 +91,9 @@ class Tray:
                 self._current_img = self._img_default
             else:
                 self._current_img = get_exe_icon_pil(exe_path, large=True)
-            # 关键：设置时用我们持有的强引用
-            self.icon.icon = self._current_img
+            self.icon.icon = self._current_img  # 用强引用
             self.icon.visible = True
         except Exception:
-            # 出错回退默认图标，确保不会“消失”
             self._current_img = self._img_default
             try:
                 self.icon.icon = self._current_img
