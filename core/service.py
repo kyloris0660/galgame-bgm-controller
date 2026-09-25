@@ -1,130 +1,142 @@
+from dataclasses import dataclass
+import logging
 import threading
-import time
-from typing import Optional, Callable, Dict, List
-from .config import Config
-from .policy import apply_policy
-from .audio import AudioPort
 
-try:
-    import comtypes
+from .paths import exe_key
+from .policy import should_mute
+from .types import MuteMode
 
-    HAVE_COM = True
-except Exception:
-    HAVE_COM = False
+log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class GameState:
+    exe: str
+    muted: bool
+    paused: bool
+    mode: MuteMode
+    controlled: bool = True
 
 
 class Service:
-    def __init__(
-        self,
-        cfg: Config,
-        audio: AudioPort,
-        focus,
-        interval: float = 0.5,
-        on_apply: Optional[
-            Callable[[Dict[str, bool], List[str], Optional[str]], None]
-        ] = None,
-    ):
-        self.cfg = cfg
-        self.audio = audio
-        self.focus = focus
+    """One worker owns Core Audio COM objects; UI receives value snapshots."""
+
+    def __init__(self, cfg, audio, focus, interval=0.5, on_state=None, on_error=None):
+        self.cfg, self.audio, self.focus = cfg, audio, focus
         self.interval = interval
+        self.on_state, self.on_error = on_state, on_error
         self._stop = threading.Event()
-        self._pause = threading.Event()
+        self._wake = threading.Event()
+        self._lock = threading.Lock()
+        self._paused = False
+        self._paused_targets = set()
+        self._dismissed = set()
         self.thread = None
-        self.on_apply = on_apply
-        self._last_actions: Optional[Dict[str, bool]] = None
-        self._last_active: Optional[str] = None
+        self._last_states = None
+        self.error = None
+
+    @property
+    def paused(self):
+        with self._lock:
+            return self._paused
+
+    def toggle_target(self, exe):
+        with self._lock:
+            key = exe_key(exe)
+            if key in self._dismissed:
+                self._dismissed.remove(key)
+                self._paused_targets.discard(key)
+            else:
+                self._paused_targets.symmetric_difference_update({key})
+        self.wake()
+
+    def dismiss_target(self, exe):
+        with self._lock:
+            self._dismissed.add(exe_key(exe))
+        self.wake()
+
+    def pause(self):
+        with self._lock:
+            self._paused = True
+        self.wake()
+
+    def resume(self):
+        with self._lock:
+            self._paused = False
+        self.wake()
+
+    def wake(self):
+        self._wake.set()
 
     def start(self):
         if self.thread and self.thread.is_alive():
             return
         self._stop.clear()
-        self._pause.clear()
-        self.thread = threading.Thread(
-            target=self._run, daemon=True, name="BGM-Service"
-        )
+        self.thread = threading.Thread(target=self._run, name="BGM-Service", daemon=True)
         self.thread.start()
 
-    def stop(self, wait: float = 3.0):
+    def stop(self, wait=5.0):
         self._stop.set()
-        self._graceful_unmute_all()
+        self.wake()
         if self.thread:
             self.thread.join(timeout=wait)
+            if self.thread.is_alive():
+                raise RuntimeError("音频控制线程仍在退出，请稍后重试")
+        if self.error:
+            raise RuntimeError(self.error)
 
-    def pause(self):
-        self._pause.set()
+    def tick(self):
+        targets = [exe_key(t) for t in self.cfg.get_targets()]
+        snapshot = self.focus.snapshot(targets)
+        with self._lock:
+            self._paused_targets.intersection_update(targets)
+            self._dismissed.intersection_update(t.exe for t in snapshot.targets)
+            paused_all, paused_targets = self._paused, self._paused_targets.copy()
+            dismissed = self._dismissed.copy()
+        states, actions = {}, {}
+        for target in snapshot.targets:
+            controlled = target.exe not in dismissed
+            paused = paused_all or target.exe in paused_targets or not controlled
+            mode = self.cfg.get_mode(target.exe)
+            mute = not paused and should_mute(mode, target.is_foreground, target.minimized)
+            states[target.exe] = GameState(target.exe, mute, paused, mode, controlled)
+            if not paused:
+                actions[target.exe] = mute
+        try:
+            self.audio.set_bulk(actions)
+        finally:
+            # A failing/disconnected device must not freeze other games' lifecycle.
+            if states != self._last_states:
+                if self.on_state:
+                    self.on_state(states)
+                self._last_states = states
 
-    def resume(self):
-        self._pause.clear()
+    def _report(self, error):
+        if self.error != error:
+            self.error = error
+            if self.on_error:
+                self.on_error(error)
 
     def _run(self):
-        com_inited = False
-        if HAVE_COM:
-            try:
-                comtypes.CoInitialize()
-                com_inited = True
-            except Exception:
-                pass
+        import comtypes
+        comtypes.CoInitialize()
         try:
             while not self._stop.is_set():
-                if self._pause.is_set():
-                    time.sleep(self.interval)
-                    continue
-                targets = [t.lower() for t in self.cfg.get_targets()]
-                if targets:
-                    snap = self.focus.snapshot(targets)
-                    mode = self.cfg.get_mode()
-                    actions = apply_policy(snap, mode)
-                    if (
-                        actions != self._last_actions
-                        or snap.active_exe != self._last_active
-                    ):
-                        self.audio.set_bulk(actions)
-                        muted = [exe for exe, m in actions.items() if m]
-                        if self.on_apply:
-                            try:
-                                self.on_apply(actions, muted, snap.active_exe)
-                            except Exception:
-                                pass
-                        self._last_actions = dict(actions)
-                        self._last_active = snap.active_exe
-                time.sleep(self.interval)
-        finally:
-            if com_inited:
+                self._wake.clear()
                 try:
-                    comtypes.CoUninitialize()
-                except Exception:
-                    pass
-
-    def _graceful_unmute_all(self):
-        com_inited = False
-        if HAVE_COM:
+                    self.tick()
+                    self._report(None)
+                except Exception as exc:
+                    if str(exc) != self.error:
+                        log.exception("Controller tick failed; retrying")
+                    self._report(str(exc))
+                self._wake.wait(self.interval)
+        finally:
             try:
-                comtypes.CoInitialize()
-                com_inited = True
-            except Exception:
-                pass
-        try:
-            muted_now = []
-            if self._last_actions:
-                for exe, m in self._last_actions.items():
-                    if m:
-                        muted_now.append(exe)
-            cfg_targets = [t.lower() for t in self.cfg.get_targets()]
-            uniq = {}
-            for exe in muted_now + cfg_targets:
-                uniq[exe] = True
-            if hasattr(self.audio, "unmute_multi"):
-                self.audio.unmute_multi(list(uniq.keys()))
-            else:
-                for exe in uniq.keys():
-                    try:
-                        self.audio.unmute_by_exe(exe)
-                    except Exception:
-                        pass
-        finally:
-            if com_inited:
-                try:
-                    comtypes.CoUninitialize()
-                except Exception:
-                    pass
+                self.audio.restore_all()
+                self._report(None)
+            except Exception as exc:
+                self._report(str(exc))
+            finally:
+                self.audio.release()
+                comtypes.CoUninitialize()

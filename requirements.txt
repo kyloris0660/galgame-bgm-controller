@@ -1,9 +1,8 @@
+# Versions validated with Python 3.13 on Windows.
 pycaw==20240210
 pywin32==311
-psutil>=5.9
-Pillow>=11.0.0
-pystray>=0.19.5
-comtypes>=1.4.12
-
-# for building exe
-pyinstaller>=6.15.0
+psutil==7.0.0
+Pillow==11.3.0
+pystray==0.19.5
+comtypes==1.4.12
+pyinstaller==6.15.0

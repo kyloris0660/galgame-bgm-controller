@@ -1,76 +1,63 @@
-from PIL import Image
+"""Cached executable icons with deterministic GDI handle cleanup."""
+import ctypes
+from functools import lru_cache
 import os
 
-try:
-    import win32gui
-    import win32api
+from PIL import Image, ImageDraw
+
+
+def placeholder(size=64):
+    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((4, 4, size - 4, size - 4), radius=12, fill="#4568df")
+    draw.ellipse((size * .25, size * .55, size * .48, size * .77), fill="white")
+    draw.line((size * .47, size * .66, size * .47, size * .25, size * .73, size * .20),
+              fill="white", width=max(2, size // 14))
+    return image
+
+
+@lru_cache(maxsize=256)
+def get_exe_icon_pil(exe_path, large=True):
+    size = 64 if large else 32
+    if not exe_path or not os.path.exists(exe_path):
+        return placeholder(size)
     import win32con
+    import win32gui
     import win32ui
 
-    HAVE_WIN = True
-except Exception:
-    HAVE_WIN = False
-
-_ICON_CACHE = {}
-
-
-def get_exe_icon_pil(exe_path: str, large=True) -> Image.Image:
-    if not exe_path:
-        return _placeholder()
-    key = (exe_path, large)
-    if key in _ICON_CACHE:
-        return _ICON_CACHE[key]
-    if not HAVE_WIN or not os.path.exists(exe_path):
-        img = _placeholder()
-        _ICON_CACHE[key] = img
-        return img
-    img = None
-    large_icons = []
-    small_icons = []
+    icon = ctypes.c_void_p()
+    screen = dc = memory = bitmap = old = None
     try:
-        large_icons, small_icons = win32gui.ExtractIconEx(exe_path, 0)
-        hicon = (large_icons or small_icons)[0]
-        target = 32  # 统一缩放到 32x32 更稳
-        ico_x = win32api.GetSystemMetrics(
-            win32con.SM_CXICON if large else win32con.SM_CXSMICON
-        )
-        ico_y = win32api.GetSystemMetrics(
-            win32con.SM_CYICON if large else win32con.SM_CYSMICON
-        )
-        ico_x = max(16, min(256, ico_x))
-        ico_y = max(16, min(256, ico_y))
-        hdc = win32ui.CreateDCFromHandle(win32gui.GetDC(0))
-        hbmp = win32ui.CreateBitmap()
-        hbmp.CreateCompatibleBitmap(hdc, ico_x, ico_y)
-        hcdc = hdc.CreateCompatibleDC()
-        hcdc.SelectObject(hbmp)
-        win32gui.DrawIconEx(
-            hcdc.GetSafeHdc(), 0, 0, hicon, ico_x, ico_y, 0, None, win32con.DI_NORMAL
-        )
-        bmpinfo = hbmp.GetInfo()
-        bmpstr = hbmp.GetBitmapBits(True)
-        img = Image.frombuffer(
-            "RGB",
-            (bmpinfo["bmWidth"], bmpinfo["bmHeight"]),
-            bmpstr,
-            "raw",
-            "BGRX",
-            0,
-            1,
-        ).convert("RGBA")
-        if img.size != (target, target):
-            img = img.resize((target, target), Image.LANCZOS)
+        result = ctypes.windll.shell32.SHDefExtractIconW(
+            ctypes.c_wchar_p(exe_path), 0, 0, ctypes.byref(icon), None, size)
+        if result != 0 or not icon.value:
+            return placeholder(size)
+        screen = win32gui.GetDC(0)
+        dc = win32ui.CreateDCFromHandle(screen)
+        memory = dc.CreateCompatibleDC()
+        bitmap = win32ui.CreateBitmap()
+        bitmap.CreateCompatibleBitmap(dc, size, size)
+        old = memory.SelectObject(bitmap)
+        memory.FillSolidRect((0, 0, size, size), 0)
+        win32gui.DrawIconEx(memory.GetSafeHdc(), 0, 0, icon.value, size, size, 0, None, win32con.DI_NORMAL)
+        image = Image.frombytes("RGBA", (size, size), bitmap.GetBitmapBits(True), "raw", "BGRA")
+        if not image.getchannel("A").getextrema()[1]:
+            # Older icons use an AND mask instead of an alpha channel.
+            memory.FillSolidRect((0, 0, size, size), 0xFFFFFF)
+            win32gui.DrawIconEx(memory.GetSafeHdc(), 0, 0, icon.value, size, size, 0, None, win32con.DI_MASK)
+            mask = Image.frombytes("RGB", (size, size), bitmap.GetBitmapBits(True), "raw", "BGRX").convert("L")
+            image.putalpha(mask.point(lambda x: 255 - x))
+        return image
     except Exception:
-        img = _placeholder()
+        return placeholder(size)
     finally:
-        try:
-            for hi in large_icons + small_icons:
-                win32gui.DestroyIcon(hi)
-        except Exception:
-            pass
-    _ICON_CACHE[key] = img
-    return img
-
-
-def _placeholder() -> Image.Image:
-    return Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+        if old and memory:
+            memory.SelectObject(old)
+        if bitmap:
+            win32gui.DeleteObject(bitmap.GetHandle())
+        if memory:
+            memory.DeleteDC()
+        if screen:
+            win32gui.ReleaseDC(0, screen)
+        if icon.value:
+            win32gui.DestroyIcon(icon.value)

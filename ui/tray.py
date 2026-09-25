@@ -1,102 +1,104 @@
-from PIL import Image, ImageDraw
-from core.icons import get_exe_icon_pil
+import hashlib
+import pystray
 
-try:
-    import pystray
-
-    HAVE = True
-except Exception:
-    HAVE = False
+from core.icons import get_exe_icon_pil, placeholder
+from .theme import MODE_LABELS
 
 
-def _default_img():
-    img = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.ellipse((3, 3, 29, 29), outline=(0, 0, 0, 255), width=2)
-    d.rectangle((14, 14, 18, 18), fill=(0, 0, 0, 255))
-    return img
+def state_label(state):
+    if not state.controlled:
+        return "本次已停止"
+    return "已暂停" if state.paused else ("自动静音" if state.muted else "允许播放")
 
 
 class Tray:
-    def __init__(self, on_select, on_pause, on_quit, on_mode_change, get_mode, on_show):
-        self.on_select = on_select
-        self.on_pause = on_pause
-        self.on_quit = on_quit
-        self.on_mode_change = on_mode_change
-        self.get_mode = get_mode
-        self.on_show = on_show  # 新增：显示主界面
+    """One icon per running registered executable, plus an idle fallback."""
+
+    def __init__(self, on_select, on_pause, on_quit, on_mode_change, on_show,
+                 on_target_pause, get_name, icon_factory=pystray.Icon, on_target_stop=None):
+        self.on_select, self.on_pause, self.on_quit = on_select, on_pause, on_quit
+        self.on_mode_change, self.on_show = on_mode_change, on_show
+        self.on_target_pause, self.get_name = on_target_pause, get_name
+        self.on_target_stop = on_target_stop
+        self.icon_factory = icon_factory
         self.icon = None
-        self._img_default = _default_img()
-        self._current_img = self._img_default  # 强引用，防止被 GC
+        self.games = {}
+        self.states = {}
+        self.paused = False
+
+    def _common(self):
+        item = pystray.MenuItem
+        return [
+            item("打开游戏库", self.on_show, default=True),
+            item("添加游戏…", self.on_select),
+            pystray.Menu.SEPARATOR,
+            item("继续全部" if self.paused else "暂停全部", self.on_pause),
+            item("退出全部控制器", self.on_quit),
+        ]
 
     def start(self):
-        if not HAVE or self.icon:
-            return
+        if not self.icon:
+            self.icon = self.icon_factory("bgm_library", placeholder(), "Galgame BGM · 等待游戏启动",
+                                          pystray.Menu(*self._common()))
+            self.icon.run_detached()
 
-        def _mode_label(item):
-            return f"静音规则（当前：{self.get_mode()}）"
+    def _menu(self, exe, state):
+        item = pystray.MenuItem
 
-        def _to_not_fg(icon, item):
-            self.on_mode_change("not_foreground")
-            try:
-                self.icon.update_menu()
-            except Exception:
-                pass
+        def toggle():
+            self.on_target_pause(exe)
 
-        def _to_min(icon, item):
-            self.on_mode_change("minimized_only")
-            try:
-                self.icon.update_menu()
-            except Exception:
-                pass
+        def background():
+            self.on_mode_change("not_foreground", exe)
 
-        menu = pystray.Menu(
-            pystray.MenuItem("显示主界面", lambda: self.on_show() or None),  # 新增项
-            pystray.MenuItem("选择监听软件", lambda: self.on_select() or None),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem(
-                _mode_label,
-                pystray.Menu(
-                    pystray.MenuItem("不在前台时静音", _to_not_fg),
-                    pystray.MenuItem("仅最小化时静音", _to_min),
-                ),
-            ),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("暂停/继续", lambda: self.on_pause() or None),
-            pystray.MenuItem("退出", lambda: self.on_quit() or None),
-        )
-        self.icon = pystray.Icon(
-            "bgm_controller", self._img_default, "BGM Controller", menu
-        )
-        self.icon.run_detached()
+        def minimized():
+            self.on_mode_change("minimized_only", exe)
+
+        def inherit():
+            self.on_mode_change(None, exe)
+
+        def stop_target():
+            if self.on_target_stop:
+                self.on_target_stop(exe)
+
+        return pystray.Menu(
+            item(self.get_name(exe)[:60], None, enabled=False),
+            item(state_label(state), None, enabled=False),
+            item("继续此游戏" if state.paused else "暂停此游戏", toggle, enabled=not self.paused),
+            item("停止此游戏控制（本次）", stop_target, enabled=self.on_target_stop is not None),
+            item("静音规则", pystray.Menu(
+                item(MODE_LABELS["not_foreground"], background, checked=lambda _: state.mode.value == "not_foreground"),
+                item(MODE_LABELS["minimized_only"], minimized, checked=lambda _: state.mode.value == "minimized_only"),
+                item("跟随默认规则", inherit))),
+            pystray.Menu.SEPARATOR, *self._common())
+
+    def sync(self, states, paused=False):
+        states = {exe: state for exe, state in states.items() if state.controlled}
+        self.start()
+        pause_changed = self.paused != paused
+        self.paused = paused
+        # Create replacements before removing the last reachable icon.
+        for exe, state in states.items():
+            if exe not in self.games:
+                name = "bgm_" + hashlib.sha256(exe.encode()).hexdigest()[:16]
+                icon = self.icon_factory(name, get_exe_icon_pil(exe),
+                                         f"{self.get_name(exe)[:70]} · {state_label(state)}",
+                                         self._menu(exe, state))
+                icon.run_detached()
+                self.games[exe] = icon
+            elif self.states.get(exe) != state or pause_changed:
+                icon = self.games[exe]
+                icon.title = f"{self.get_name(exe)[:70]} · {state_label(state)}"
+                icon.menu = self._menu(exe, state)
+        self.icon.visible = not bool(states)
+        self.icon.menu = pystray.Menu(*self._common())
+        for exe in set(self.games) - set(states):
+            self.games.pop(exe).stop()
+        self.states = dict(states)
 
     def stop(self):
-        if self.icon:
-            try:
-                self.icon.visible = False
-            except Exception:
-                pass
-            try:
-                self.icon.stop()
-            except Exception:
-                pass
-            self.icon = None
-        self._current_img = None  # 允许回收
-
-    def set_icon_from_exe(self, exe_path: str | None):
-        if not self.icon:
-            return
-        try:
-            if not exe_path:
-                self._current_img = self._img_default
-            else:
-                self._current_img = get_exe_icon_pil(exe_path, large=True)
-            self.icon.icon = self._current_img  # 用强引用
-            self.icon.visible = True
-        except Exception:
-            self._current_img = self._img_default
-            try:
-                self.icon.icon = self._current_img
-                self.icon.visible = True
-            except Exception:
-                pass
+        for icon in list(self.games.values()) + ([self.icon] if self.icon else []):
+            icon.stop()
+        self.games.clear()
+        self.icon = None
+        self.states.clear()

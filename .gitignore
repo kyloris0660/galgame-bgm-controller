@@ -22,3 +22,7 @@ config.json
 *.log
 Thumbs.db
 .DS_Store
+.artifacts/
+.pytest_cache/
+.venv/
+__pycache__/

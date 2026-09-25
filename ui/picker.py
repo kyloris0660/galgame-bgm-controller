@@ -1,269 +1,178 @@
-# ui/picker.py
-import os
 import tkinter as tk
-from tkinter import ttk, messagebox
-from PIL import ImageTk
+from tkinter import ttk, filedialog
+
+from PIL import ImageTk, Image
 from core.icons import get_exe_icon_pil
-
-try:
-    import psutil
-    import win32gui
-    import win32process
-
-    HAVE = True
-except Exception:
-    HAVE = False
+from core.paths import exe_key, app_name
+from core.windows import taskbar_apps
+from .theme import BG, INK, MUTED, ACCENT, FONT
 
 
 class ProcessPicker(tk.Toplevel):
-    """带图标的进程选择器：前台优先淡黄高亮，右侧预览大图标+路径，支持多选。"""
+    """Launchpad-like picker showing running taskbar applications, not services."""
 
-    def __init__(self, master, multiselect=True):
+    def __init__(self, master, multiselect=True, existing=(), provider=taskbar_apps):
         super().__init__(master)
-        self.title("选择要监听的进程（带图标）")
+        self.title("添加游戏 · Galgame BGM")
+        self.geometry("1080x780")
+        self.minsize(840, 640)
+        self.configure(bg=BG)
         self.result = None
-        self.protocol("WM_DELETE_WINDOW", self.on_cancel)
-        self.geometry("820x520")
-
+        self.names = {}
+        self.provider = provider
+        self.multiselect = multiselect
+        self.existing = {exe_key(e) for e in existing}
+        self.selected = {}
         self._photos = {}
         self._items = []
+        self._columns = 0
+        self._filter_job = None
         self._refresh_job = None
         self._closed = False
+        self.protocol("WM_DELETE_WINDOW", self.on_cancel)
 
-        # 顶栏：搜索 + “优先显示推荐”
-        bar = ttk.Frame(self, padding=(10, 8, 10, 6))
-        bar.pack(fill="x")
-        ttk.Label(bar, text="搜索：", font=("", 10, "bold")).pack(side="left")
+        header = ttk.Frame(self, padding=(26, 20, 26, 12))
+        header.pack(fill="x")
+        ttk.Label(header, text="选择正在运行的游戏", font=(FONT, 20, "bold")).pack(anchor="w")
+        ttk.Label(header, text="只显示任务栏应用 · 点击图标多选 · 已添加的游戏会自动监听",
+                  style="Muted.TLabel").pack(anchor="w", pady=(5, 14))
+        search = ttk.Frame(header)
+        search.pack(fill="x")
+        ttk.Label(search, text="搜索应用").pack(side="left", padx=(0, 10))
         self.var_q = tk.StringVar()
-        ent = ttk.Entry(bar, textvariable=self.var_q, width=40)
-        ent.pack(side="left", fill="x", expand=True, padx=(4, 8))
-        # 输入防抖：减少频繁刷新导致的闪烁
-        self.var_q.trace_add("write", lambda *_: self._schedule_refresh(120))
-        self.var_hot = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            bar,
-            text="优先显示推荐",
-            variable=self.var_hot,
-            command=lambda: self._schedule_refresh(0),
-        ).pack(side="left")
+        self.entry = ttk.Entry(search, textvariable=self.var_q)
+        self.entry.pack(side="left", fill="x", expand=True)
+        self.var_q.trace_add("write", self._schedule_filter)
+        ttk.Button(search, text="刷新", command=self.reload).pack(side="left", padx=(10, 0))
 
-        # 主区：左树 + 右预览
-        main = ttk.Frame(self, padding=(10, 0, 10, 10))
-        main.pack(fill="both", expand=True)
-        left = ttk.Frame(main)
-        left.pack(side="left", fill="both", expand=True)
-        columns = ("name", "exe")
-        self.tree = ttk.Treeview(
-            left,
-            columns=columns,
-            show="tree headings",
-            selectmode=("extended" if multiselect else "browse"),
-        )
-        self.tree.heading("#0", text="图标")
-        self.tree.heading("name", text="名称")
-        self.tree.heading("exe", text="可执行文件路径")
-        self.tree.column("#0", width=48, stretch=False)
-        self.tree.column("name", width=220)
-        self.tree.column("exe", width=420)
-        self.tree.pack(side="left", fill="both", expand=True)
-        sb = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
-        sb.pack(side="right", fill="y")
-        self.tree.configure(yscrollcommand=sb.set)
-        self.tree.tag_configure("hot", background="#fffce6")
-        self.tree.bind("<<TreeviewSelect>>", self._on_select)
-        self.tree.bind("<Double-1>", lambda e: self.on_ok())
+        body = ttk.Frame(self, padding=(20, 0, 20, 0))
+        body.pack(fill="both", expand=True)
+        self.canvas = tk.Canvas(body, background=BG, highlightthickness=0)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        scroll = ttk.Scrollbar(body, orient="vertical", command=self.canvas.yview)
+        scroll.pack(side="right", fill="y")
+        self.canvas.configure(yscrollcommand=scroll.set)
+        self.grid_frame = tk.Frame(self.canvas, bg=BG)
+        self._window = self.canvas.create_window((0, 0), window=self.grid_frame, anchor="nw")
+        self.canvas.bind("<Configure>", self._resize)
+        self.grid_frame.bind("<Configure>", lambda _: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.bind("<MouseWheel>", self._wheel)
+        self.bind("<Escape>", lambda _: self.on_cancel())
+        self.bind("<Control-f>", lambda _: self.entry.focus_set())
+        self.bind("<Return>", lambda _: self.on_ok())
 
-        right = ttk.Frame(main, width=260)
-        right.pack(side="right", fill="y")
-        right.pack_propagate(False)
-        self.lbl_big = ttk.Label(right)
-        self.lbl_big.pack(pady=(4, 8))
-        self.lbl_title = ttk.Label(right, text="未选择", font=("", 12, "bold"))
-        self.lbl_title.pack(anchor="w")
-        self.lbl_exe = ttk.Label(right, text="", wraplength=240)
-        self.lbl_exe.pack(anchor="w", pady=(2, 10))
-
-        # 底部按钮
-        bot = ttk.Frame(self, padding=(10, 0, 10, 10))
-        bot.pack(fill="x")
-        self.btn_ok = ttk.Button(bot, text="确定", command=self.on_ok)
+        footer = ttk.Frame(self, padding=(26, 14, 26, 20))
+        footer.pack(fill="x", side="bottom", before=body)
+        self.summary = ttk.Label(footer, text="", style="Muted.TLabel")
+        self.summary.pack(anchor="w", pady=(0, 10))
+        ttk.Button(footer, text="找不到？从文件添加…", command=self.browse).pack(side="left")
+        self.btn_ok = ttk.Button(footer, text="添加所选", style="Accent.TButton", command=self.on_ok)
         self.btn_ok.pack(side="right")
-        ttk.Button(bot, text="取消", command=self.on_cancel).pack(
-            side="right", padx=(0, 6)
-        )
-
-        # 初次加载与刷新
-        self._load()
-        self._schedule_refresh(0)
-
-        # 模态
+        ttk.Button(footer, text="取消", command=self.on_cancel).pack(side="right", padx=(0, 10))
+        self.reload()
         self.transient(master)
         self.grab_set()
-        ent.focus_set()
+        self.entry.focus_set()
 
-    def _get_foreground_exe(self):
-        try:
-            hwnd = win32gui.GetForegroundWindow()
-            if not hwnd:
-                return None
-            _, pid = win32process.GetWindowThreadProcessId(hwnd)
-            import psutil as _ps
+    def _wheel(self, event):
+        self.canvas.yview_scroll(-int(event.delta / 120), "units")
+        return "break"
 
-            return (_ps.Process(pid).exe() or "").lower()
-        except Exception:
-            return None
+    def _resize(self, event):
+        self.canvas.itemconfigure(self._window, width=event.width)
+        columns = max(3, event.width // 190)
+        if columns != self._columns:
+            self._columns = columns
+            self.render()
 
-    def _load(self):
-        self._items.clear()
-        if not HAVE:
+    def _schedule_filter(self, *_):
+        if self._filter_job:
+            self.after_cancel(self._filter_job)
+        self._filter_job = self.after(120, self.render)
+
+    def reload(self):
+        if self._closed:
             return
-        seen = set()
-        fg = self._get_foreground_exe()
-        try:
-            iterator = psutil.process_iter(["name", "exe"])
-        except Exception:
-            iterator = []
-        for p in iterator:
-            try:
-                exe = (p.info.get("exe") or "").strip()
-                if not exe:
-                    continue
-                key = exe.lower()
-                if key in seen:
-                    continue
-                seen.add(key)
-                name = (p.info.get("name") or os.path.basename(exe)) or exe
-                score = 100 if key == fg else 0
-                self._items.append({"name": name, "exe": exe, "score": score})
-            except Exception:
-                continue
-        for it in sorted(self._items, key=lambda x: -x["score"])[:12]:
-            try:
-                self._get_photo(it["exe"], 20)
-            except Exception:
-                pass
-
-    def _get_photo(self, exe, size):
-        key = (exe, size)
-        if key in self._photos:
-            return self._photos[key]
-        pil = get_exe_icon_pil(exe, large=True)
-        if pil.size != (size, size):
-            pil = pil.resize((size, size), resample=1)
-        ph = ImageTk.PhotoImage(pil)
-        self._photos[key] = ph
-        return ph
-
-    def _schedule_refresh(self, delay_ms):
         if self._refresh_job:
-            try:
-                self.after_cancel(self._refresh_job)
-            except Exception:
-                pass
-            self._refresh_job = None
-        if self._closed or not self.winfo_exists():
-            return
-        self._refresh_job = self.after(delay_ms, self._refresh)
-
-    def _refresh(self, *_):
-        if self._closed or not self.winfo_exists():
-            return
-        q = (self.var_q.get() or "").lower()
-        only_hot = self.var_hot.get()
-        items = [
-            it
-            for it in self._items
-            if (not q or q in it["name"].lower() or q in it["exe"].lower())
-        ]
-        items.sort(key=lambda x: (-x["score"], x["name"].lower(), x["exe"].lower()))
-
-        # 关键：先清空再插入，避免“越刷越多”
+            self.after_cancel(self._refresh_job)
         try:
-            self.tree.delete(*self.tree.get_children())
+            self._items = sorted(self.provider(), key=lambda a: (a.title or app_name(a.exe)).casefold())
+            self._load_error = None
         except Exception:
-            return
+            self._load_error = "暂时无法读取任务栏，请重试或从文件添加。"
+        self.render()
+        self._refresh_job = self.after(4000, self.reload)
 
-        for it in items:
-            tags = ("hot",) if it["score"] >= 100 else ()
-            img = None
-            try:
-                img = self._get_photo(it["exe"], 18)
-            except Exception:
-                img = None
-            if only_hot and not tags:
-                iid = self.tree.insert(
-                    "", "end", text="", image=img, values=(it["name"], it["exe"])
-                )
-                self.tree.item(iid, tags=("dim",))
-                self.tree.tag_configure("dim", foreground="#666666")
-            else:
-                self.tree.insert(
-                    "",
-                    "end",
-                    text="",
-                    image=img,
-                    values=(it["name"], it["exe"]),
-                    tags=tags,
-                )
+    def render(self):
+        self._filter_job = None
+        focused = self.focus_get()
+        focused_key = getattr(focused, "_app_key", None)
+        for child in self.grid_frame.winfo_children():
+            child.destroy()
+        q = self.var_q.get().strip().casefold()
+        items = [a for a in self._items if not q or q in (a.title + " " + app_name(a.exe)).casefold()]
+        columns = self._columns or 5
+        for index in range(8):
+            self.grid_frame.columnconfigure(index, weight=1 if index < columns else 0, uniform="cards" if index < columns else "")
+        for index, app in enumerate(items):
+            key = exe_key(app.exe)
+            known = key in self.existing
+            selected = key in self.selected
+            if key not in self._photos:
+                self._photos[key] = ImageTk.PhotoImage(get_exe_icon_pil(app.exe).resize((56, 56), Image.Resampling.LANCZOS))
+            title = app.title or app_name(app.exe)
+            title = title if len(title) <= 14 else title[:13] + "…"
+            suffix = "已添加" if known else ("✓ 已选择" if selected else app_name(app.exe))
+            card = tk.Button(
+                self.grid_frame, image=self._photos[key], text=f"{title}\n{suffix[:18]}",
+                compound="top", wraplength=170, height=168, font=(FONT, 9), fg=MUTED if known else INK,
+                bg="#e3eaff" if selected else "white", activebackground="#eaf0ff",
+                relief="flat", bd=0, highlightthickness=2,
+                highlightbackground=ACCENT if selected else BG, highlightcolor=ACCENT,
+                padx=8, pady=12, cursor="hand2", takefocus=not known,
+                state="disabled" if known else "normal", command=lambda a=app: self.toggle(a))
+            card._app_key = key
+            card.grid(row=index // columns, column=index % columns, sticky="nsew", padx=5, pady=5)
+            if focused_key == key:
+                card.focus_set()
+        if not items:
+            tk.Label(self.grid_frame, text=self._load_error or ("没有匹配的应用" if q else "未找到任务栏应用\n先打开游戏，或从文件添加"),
+                     bg=BG, fg=MUTED, font=(FONT, 13), pady=65).grid(columnspan=columns, sticky="ew")
+        self.summary.config(text=self._load_error or f"{len(self._items)} 个任务栏应用  ·  已选 {len(self.selected)} 个")
+        self.btn_ok.config(text=f"添加所选（{len(self.selected)}）", state="normal" if self.selected else "disabled")
 
-        self._refresh_ok()
+    def toggle(self, app):
+        key = exe_key(app.exe)
+        if key in self.selected:
+            self.selected.pop(key)
+        else:
+            if not self.multiselect:
+                self.selected.clear()
+            self.selected[key] = app.exe
+            self.names[key] = app.title or app_name(app.exe)
+        self.render()
 
-    def _refresh_ok(self, *_):
-        has_sel = bool(self.tree.selection())
-        try:
-            self.btn_ok.configure(state=("normal" if has_sel else "disabled"))
-        except Exception:
-            pass
-
-    def _on_select(self, *_):
-        self._refresh_ok()
-        sels = self.tree.selection()
-        if not sels:
-            self.lbl_title.config(text="未选择")
-            self.lbl_exe.config(text="")
-            self.lbl_big.config(image="")
-            self.lbl_big.image = None
-            return
-        exe = self.tree.item(sels[0], "values")[1]
-        self.lbl_title.config(text=os.path.basename(exe))
-        self.lbl_exe.config(text=exe)
-        try:
-            big = self._get_photo(exe, 48)
-            self.lbl_big.config(image=big)
-            self.lbl_big.image = big
-        except Exception:
-            self.lbl_big.config(image="")
-            self.lbl_big.image = None
+    def browse(self):
+        files = filedialog.askopenfilenames(parent=self, title="选择游戏程序", filetypes=[("Windows 应用", "*.exe")])
+        for path in files:
+            key = exe_key(path)
+            if key not in self.existing:
+                self.selected[key] = path
+                self.names[key] = app_name(path)
+        self.render()
 
     def on_ok(self):
-        sels = self.tree.selection()
-        if not sels:
-            messagebox.showinfo("提示", "请先选择至少一个进程")
-            return
-        exes = [self.tree.item(i, "values")[1] for i in sels]
-        # 去重
-        dedup = {}
-        for e in exes:
-            dedup[e] = True
-        self.result = list(dedup.keys())
-        self._close()
+        if self.selected:
+            self.result = list(self.selected.values())
+            self._close()
 
     def on_cancel(self):
-        self.result = None
         self._close()
 
     def _close(self):
         self._closed = True
-        if self._refresh_job:
-            try:
-                self.after_cancel(self._refresh_job)
-            except Exception:
-                pass
-            self._refresh_job = None
-        try:
-            self.grab_release()
-        except Exception:
-            pass
+        for job in (self._refresh_job, self._filter_job):
+            if job:
+                self.after_cancel(job)
+        self.grab_release()
         self.destroy()
-        # 释放图片缓存引用，避免内存泄漏
-        self._photos.clear()
